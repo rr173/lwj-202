@@ -375,6 +375,217 @@ app.put('/api/swap-requests/:id/reject', (req, res) => {
   });
 });
 
+const SHIFT_TIMES = {
+  morning: { start: '08:00', end: '16:00' },
+  afternoon: { start: '14:00', end: '22:00' },
+  night: { start: '22:00', end: '08:00' }
+};
+
+const checkTimeOverlap = (start1, end1, start2, end2) => {
+  const toMinutes = (time) => {
+    const [h, m] = time.split(':').map(Number);
+    return h * 60 + m;
+  };
+  
+  let s1 = toMinutes(start1);
+  let e1 = toMinutes(end1);
+  let s2 = toMinutes(start2);
+  let e2 = toMinutes(end2);
+  
+  if (e1 < s1) e1 += 24 * 60;
+  if (e2 < s2) e2 += 24 * 60;
+  
+  return !(e1 <= s2 || e2 <= s1);
+};
+
+app.get('/api/departments/:id/overtime-requests', (req, res) => {
+  const { id } = req.params;
+  const { status, month } = req.query;
+  
+  let query = `
+    SELECT orr.*, n.name as nurse_name, n.level
+    FROM overtime_requests orr
+    JOIN nurses n ON orr.nurse_id = n.id
+    WHERE orr.department_id = ?
+  `;
+  const params = [id];
+  
+  if (status) {
+    query += ' AND orr.status = ?';
+    params.push(status);
+  }
+  
+  if (month) {
+    query += ' AND orr.month = ?';
+    params.push(month);
+  }
+  
+  query += ' ORDER BY orr.created_at DESC';
+  
+  db.all(query, params, (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(rows);
+  });
+});
+
+app.post('/api/overtime-requests', (req, res) => {
+  const { department_id, nurse_id, date, start_time, end_time, reason } = req.body;
+  
+  if (!department_id || !nurse_id || !date || !start_time || !end_time) {
+    return res.status(400).json({ error: '请填写完整的加班信息' });
+  }
+  
+  const start = new Date(`2000-01-01T${start_time}`);
+  const end = new Date(`2000-01-01T${end_time}`);
+  let hours = (end - start) / (1000 * 60 * 60);
+  if (hours < 0) hours += 24;
+  if (hours <= 0) {
+    return res.status(400).json({ error: '加班时长必须大于0' });
+  }
+  
+  const month = date.substring(0, 7);
+  
+  db.get('SELECT * FROM schedules WHERE nurse_id = ? AND date = ?', [nurse_id, date], (err, schedule) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    if (schedule) {
+      const shiftTime = SHIFT_TIMES[schedule.shift];
+      if (checkTimeOverlap(start_time, end_time, shiftTime.start, shiftTime.end)) {
+        return res.status(400).json({ error: '加班时段不能与当天已有排班重叠' });
+      }
+    }
+    
+    db.run(`
+      INSERT INTO overtime_requests (department_id, nurse_id, date, start_time, end_time, hours, reason, status, month)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+    `, [department_id, nurse_id, date, start_time, end_time, hours, reason, month], function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ id: this.lastID, success: true });
+    });
+  });
+});
+
+app.put('/api/overtime-requests/:id/approve', (req, res) => {
+  const { id } = req.params;
+
+  db.get('SELECT * FROM overtime_requests WHERE id = ?', [id], (err, request) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!request) {
+      return res.status(404).json({ error: '加班申请不存在' });
+    }
+    if (request.status !== 'pending') {
+      return res.status(400).json({ error: '该申请已处理' });
+    }
+    
+    db.get('SELECT * FROM schedules WHERE nurse_id = ? AND date = ?', [request.nurse_id, request.date], (err, schedule) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      
+      if (schedule) {
+        const shiftTime = SHIFT_TIMES[schedule.shift];
+        if (checkTimeOverlap(request.start_time, request.end_time, shiftTime.start, shiftTime.end)) {
+          return res.status(400).json({ error: '加班时段与当天排班重叠，无法审批通过' });
+        }
+      }
+      
+      db.run('UPDATE overtime_requests SET status = ? WHERE id = ?', ['approved', id], function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        res.json({ success: true });
+      });
+    });
+  });
+});
+
+app.put('/api/overtime-requests/:id/reject', (req, res) => {
+  const { id } = req.params;
+
+  db.get('SELECT * FROM overtime_requests WHERE id = ?', [id], (err, request) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!request) {
+      return res.status(404).json({ error: '加班申请不存在' });
+    }
+    if (request.status !== 'pending') {
+      return res.status(400).json({ error: '该申请已处理' });
+    }
+
+    db.run('UPDATE overtime_requests SET status = ? WHERE id = ?', ['rejected', id], function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ success: true });
+    });
+  });
+});
+
+app.get('/api/departments/:id/monthly-report', (req, res) => {
+  const { id } = req.params;
+  const { month } = req.query;
+  
+  if (!month) {
+    return res.status(400).json({ error: '请提供月份参数' });
+  }
+  
+  db.all('SELECT * FROM nurses WHERE department_id = ?', [id], (err, nurses) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    db.all(
+      'SELECT nurse_id, COUNT(*) as shift_count FROM schedules WHERE department_id = ? AND month = ? GROUP BY nurse_id',
+      [id, month],
+      (err, scheduleCounts) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        
+        db.all(
+          "SELECT nurse_id, COUNT(*) as overtime_count, SUM(hours) as overtime_hours FROM overtime_requests WHERE department_id = ? AND month = ? AND status = 'approved' GROUP BY nurse_id",
+          [id, month],
+          (err, overtimeStats) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+            
+            const report = nurses.map(nurse => {
+              const scheduleStat = scheduleCounts.find(s => s.nurse_id === nurse.id) || { shift_count: 0 };
+              const overtimeStat = overtimeStats.find(o => o.nurse_id === nurse.id) || { overtime_count: 0, overtime_hours: 0 };
+              
+              const normal_hours = scheduleStat.shift_count * 8;
+              const overtime_hours = Math.round((overtimeStat.overtime_hours || 0) * 100) / 100;
+              
+              return {
+                nurse_id: nurse.id,
+                nurse_name: nurse.name,
+                nurse_level: nurse.level,
+                normal_shift_count: scheduleStat.shift_count,
+                overtime_count: overtimeStat.overtime_count,
+                normal_hours,
+                overtime_hours,
+                total_hours: Math.round((normal_hours + overtime_hours) * 100) / 100
+              };
+            });
+            
+            res.json(report);
+          }
+        );
+      }
+    );
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

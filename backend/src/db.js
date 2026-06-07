@@ -56,6 +56,22 @@ db.serialize(() => {
     FOREIGN KEY (requester_id) REFERENCES nurses(id),
     FOREIGN KEY (target_id) REFERENCES nurses(id)
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS overtime_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    hours REAL NOT NULL,
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    month TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id)
+  )`);
 });
 
 module.exports = db;

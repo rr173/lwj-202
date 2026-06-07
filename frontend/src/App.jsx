@@ -1,16 +1,20 @@
 import { useState, useEffect } from 'react';
 import { 
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
-  message, Tabs, Badge, Popconfirm, Space, Tag, Radio
+  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input
 } from 'antd';
 import dayjs from 'dayjs';
+import ReactECharts from 'echarts-for-react';
 import { 
   getDepartments, getNurses, getSchedule, generateSchedule, updateSchedule,
-  getSwapRequests, createSwapRequest, confirmSwapRequest, approveSwapRequest, rejectSwapRequest
+  getSwapRequests, createSwapRequest, confirmSwapRequest, approveSwapRequest, rejectSwapRequest,
+  getOvertimeRequests, createOvertimeRequest, approveOvertimeRequest, rejectOvertimeRequest,
+  getMonthlyReport
 } from './api';
 
 const { Option } = Select;
 const { Header, Sider, Content } = Layout;
+const { TextArea } = Input;
 
 const SHIFT_NAMES = {
   morning: '早班',
@@ -24,6 +28,12 @@ const SHIFT_COLORS = {
   night: '#722ed1'
 };
 
+const OVERTIME_STATUS = {
+  pending: { text: '待审批', color: 'gold' },
+  approved: { text: '已通过', color: 'green' },
+  rejected: { text: '已拒绝', color: 'red' }
+};
+
 function App() {
   const [departments, setDepartments] = useState([]);
   const [selectedDept, setSelectedDept] = useState(null);
@@ -32,9 +42,14 @@ function App() {
   const [month, setMonth] = useState(dayjs());
   const [viewMode, setViewMode] = useState('month');
   const [swapRequests, setSwapRequests] = useState([]);
+  const [overtimeRequests, setOvertimeRequests] = useState([]);
+  const [monthlyReport, setMonthlyReport] = useState([]);
   const [swapModalVisible, setSwapModalVisible] = useState(false);
+  const [overtimeModalVisible, setOvertimeModalVisible] = useState(false);
   const [selectedCell, setSelectedCell] = useState(null);
+  const [selectedOvertimeNurse, setSelectedOvertimeNurse] = useState(null);
   const [form] = Form.useForm();
+  const [overtimeForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -46,6 +61,8 @@ function App() {
       loadNurses();
       loadSchedule();
       loadSwapRequests();
+      loadOvertimeRequests();
+      loadMonthlyReport();
     }
   }, [selectedDept, month]);
 
@@ -91,6 +108,26 @@ function App() {
     }
   };
 
+  const loadOvertimeRequests = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getOvertimeRequests(selectedDept.id);
+      setOvertimeRequests(res.data);
+    } catch (err) {
+      message.error('加载加班申请失败');
+    }
+  };
+
+  const loadMonthlyReport = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getMonthlyReport(selectedDept.id, month.format('YYYY-MM'));
+      setMonthlyReport(res.data);
+    } catch (err) {
+      message.error('加载月度报表失败');
+    }
+  };
+
   const handleGenerateSchedule = async () => {
     if (!selectedDept) return;
     setLoading(true);
@@ -98,6 +135,7 @@ function App() {
       const res = await generateSchedule(selectedDept.id, month.format('YYYY-MM'));
       message.success('排班生成成功');
       loadSchedule();
+      loadMonthlyReport();
     } catch (err) {
       message.error(`排班生成失败: ${err.response?.data?.error || err.message}`);
     }
@@ -157,6 +195,7 @@ function App() {
       message.success('审批通过');
       loadSwapRequests();
       loadSchedule();
+      loadMonthlyReport();
     } catch (err) {
       message.error(`审批失败: ${err.response?.data?.error || err.message}`);
     }
@@ -167,6 +206,51 @@ function App() {
       await rejectSwapRequest(id);
       message.success('已拒绝');
       loadSwapRequests();
+    } catch (err) {
+      message.error(`操作失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleOvertimeSubmit = async () => {
+    try {
+      const values = await overtimeForm.validateFields();
+      const startTime = values.startTime.format('HH:mm');
+      const endTime = values.endTime.format('HH:mm');
+      
+      await createOvertimeRequest({
+        department_id: selectedDept.id,
+        nurse_id: selectedOvertimeNurse,
+        date: values.date.format('YYYY-MM-DD'),
+        start_time: startTime,
+        end_time: endTime,
+        reason: values.reason
+      });
+      
+      message.success('加班申请已提交');
+      setOvertimeModalVisible(false);
+      overtimeForm.resetFields();
+      loadOvertimeRequests();
+    } catch (err) {
+      message.error(`提交失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleApproveOvertime = async (id) => {
+    try {
+      await approveOvertimeRequest(id);
+      message.success('审批通过');
+      loadOvertimeRequests();
+      loadMonthlyReport();
+    } catch (err) {
+      message.error(`审批失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleRejectOvertime = async (id) => {
+    try {
+      await rejectOvertimeRequest(id);
+      message.success('已拒绝');
+      loadOvertimeRequests();
     } catch (err) {
       message.error(`操作失败: ${err.response?.data?.error || err.message}`);
     }
@@ -195,8 +279,235 @@ function App() {
     return schedule.find(s => s.nurse_id === nurseId && s.date === date.format('YYYY-MM-DD'));
   };
 
+  const getOvertimeForNurseAndDate = (nurseId, date) => {
+    return overtimeRequests.filter(
+      o => o.nurse_id === nurseId && o.date === date.format('YYYY-MM-DD') && o.status === 'approved'
+    );
+  };
+
   const days = getDaysInView();
-  const pendingCount = swapRequests.filter(r => r.status === 'pending' || r.status === 'confirmed').length;
+  const pendingSwapCount = swapRequests.filter(r => r.status === 'pending' || r.status === 'confirmed').length;
+  const pendingOvertimeCount = overtimeRequests.filter(r => r.status === 'pending').length;
+
+  const getChartOption = () => {
+    const names = monthlyReport.map(r => r.nurse_name);
+    const normalHours = monthlyReport.map(r => r.normal_hours);
+    const overtimeHours = monthlyReport.map(r => r.overtime_hours);
+    
+    return {
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' }
+      },
+      legend: {
+        data: ['正常工时', '加班工时'],
+        bottom: 0
+      },
+      grid: {
+        left: '3%',
+        right: '4%',
+        bottom: '15%',
+        top: '10%',
+        containLabel: true
+      },
+      xAxis: {
+        type: 'category',
+        data: names,
+        axisLabel: {
+          rotate: 30,
+          interval: 0
+        }
+      },
+      yAxis: {
+        type: 'value',
+        name: '小时'
+      },
+      series: [
+        {
+          name: '正常工时',
+          type: 'bar',
+          data: normalHours,
+          itemStyle: { color: '#1890ff' },
+          barWidth: '30%'
+        },
+        {
+          name: '加班工时',
+          type: 'bar',
+          data: overtimeHours,
+          itemStyle: { color: '#fa8c16' },
+          barWidth: '30%'
+        }
+      ]
+    };
+  };
+
+  const reportColumns = [
+    {
+      title: '护士姓名',
+      dataIndex: 'nurse_name',
+      key: 'nurse_name',
+      width: 120
+    },
+    {
+      title: '正常班次数',
+      dataIndex: 'normal_shift_count',
+      key: 'normal_shift_count',
+      width: 100,
+      align: 'center'
+    },
+    {
+      title: '加班次数',
+      dataIndex: 'overtime_count',
+      key: 'overtime_count',
+      width: 100,
+      align: 'center'
+    },
+    {
+      title: '正常工时(小时)',
+      dataIndex: 'normal_hours',
+      key: 'normal_hours',
+      width: 120,
+      align: 'center'
+    },
+    {
+      title: '加班工时(小时)',
+      dataIndex: 'overtime_hours',
+      key: 'overtime_hours',
+      width: 120,
+      align: 'center'
+    },
+    {
+      title: '总工时(小时)',
+      dataIndex: 'total_hours',
+      key: 'total_hours',
+      width: 120,
+      align: 'center',
+      render: (text) => <strong>{text}</strong>
+    }
+  ];
+
+  const rightPanelItems = [
+    {
+      key: 'swap',
+      label: (
+        <span>
+          换班审批
+          {pendingSwapCount > 0 && <Badge count={pendingSwapCount} style={{ marginLeft: 8 }} />}
+        </span>
+      ),
+      children: (
+        <div style={{ padding: '8px 0' }}>
+          {swapRequests.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#999', padding: '40px 0' }}>
+              暂无换班申请
+            </div>
+          ) : (
+            swapRequests.map(req => (
+              <div 
+                key={req.id} 
+                style={{ 
+                  border: '1px solid #e8e8e8', 
+                  borderRadius: '8px', 
+                  padding: '12px', 
+                  marginBottom: '12px',
+                  background: '#fafafa'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontWeight: '500' }}>{req.date}</span>
+                  <Tag color={
+                    req.status === 'pending' ? 'gold' :
+                    req.status === 'confirmed' ? 'blue' :
+                    req.status === 'approved' ? 'green' : 'red'
+                  }>
+                    {req.status === 'pending' ? '待确认' :
+                     req.status === 'confirmed' ? '待审批' :
+                     req.status === 'approved' ? '已通过' : '已拒绝'}
+                  </Tag>
+                </div>
+                <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
+                  <div>{req.requester_name} ({SHIFT_NAMES[req.requester_shift]}) ↔ {req.target_name} ({SHIFT_NAMES[req.target_shift]})</div>
+                </div>
+                {req.status === 'pending' && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                    <Button size="small" onClick={() => handleConfirmSwap(req.id)}>
+                      确认
+                    </Button>
+                    <Button size="small" danger onClick={() => handleRejectSwap(req.id)}>
+                      拒绝
+                    </Button>
+                  </div>
+                )}
+                {req.status === 'confirmed' && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                    <Button size="small" type="primary" onClick={() => handleApproveSwap(req.id)}>
+                      通过
+                    </Button>
+                    <Button size="small" danger onClick={() => handleRejectSwap(req.id)}>
+                      拒绝
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )
+    },
+    {
+      key: 'overtime',
+      label: (
+        <span>
+          加班审批
+          {pendingOvertimeCount > 0 && <Badge count={pendingOvertimeCount} style={{ marginLeft: 8 }} />}
+        </span>
+      ),
+      children: (
+        <div style={{ padding: '8px 0' }}>
+          {overtimeRequests.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#999', padding: '40px 0' }}>
+              暂无加班申请
+            </div>
+          ) : (
+            overtimeRequests.map(req => (
+              <div 
+                key={req.id} 
+                style={{ 
+                  border: '1px solid #e8e8e8', 
+                  borderRadius: '8px', 
+                  padding: '12px', 
+                  marginBottom: '12px',
+                  background: '#fafafa'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontWeight: '500' }}>{req.date}</span>
+                  <Tag color={OVERTIME_STATUS[req.status].color}>
+                    {OVERTIME_STATUS[req.status].text}
+                  </Tag>
+                </div>
+                <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
+                  <div><strong>{req.nurse_name}</strong></div>
+                  <div>时段: {req.start_time} - {req.end_time} ({req.hours}小时)</div>
+                  {req.reason && <div>原因: {req.reason}</div>}
+                </div>
+                {req.status === 'pending' && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                    <Button size="small" type="primary" onClick={() => handleApproveOvertime(req.id)}>
+                      通过
+                    </Button>
+                    <Button size="small" danger onClick={() => handleRejectOvertime(req.id)}>
+                      拒绝
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )
+    }
+  ];
 
   return (
     <Layout style={{ height: '100vh' }}>
@@ -244,13 +555,22 @@ function App() {
               </div>
             </div>
           </div>
-          <Button type="primary" loading={loading} onClick={handleGenerateSchedule}>
-            生成排班
-          </Button>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <Button onClick={() => {
+              setSelectedOvertimeNurse(null);
+              overtimeForm.resetFields();
+              setOvertimeModalVisible(true);
+            }}>
+              申请加班
+            </Button>
+            <Button type="primary" loading={loading} onClick={handleGenerateSchedule}>
+              生成排班
+            </Button>
+          </div>
         </Header>
         <Layout>
           <Content style={{ padding: '24px', overflow: 'auto' }}>
-            <div style={{ background: '#fff', padding: '24px', borderRadius: '8px' }}>
+            <div style={{ background: '#fff', padding: '24px', borderRadius: '8px', marginBottom: '24px' }}>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: days.length * 70 + 150 }}>
                   <thead>
@@ -277,11 +597,11 @@ function App() {
                         </td>
                         {days.map(day => {
                           const shift = getShiftForNurseAndDate(nurse.id, day);
+                          const overtimes = getOvertimeForNurseAndDate(nurse.id, day);
                           return (
                             <td 
                               key={day.format('YYYY-MM-DD')} 
-                              style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'center', cursor: shift ? 'pointer' : 'default' }}
-                              onClick={() => shift && handleCellClick(nurse, day.format('YYYY-MM-DD'), shift.shift, shift.id)}
+                              style={{ border: '1px solid #e8e8e8', padding: '4px', textAlign: 'center', verticalAlign: 'top' }}
                             >
                               {shift && (
                                 <div 
@@ -291,12 +611,30 @@ function App() {
                                     color: '#fff', 
                                     fontSize: '12px',
                                     background: SHIFT_COLORS[shift.shift],
-                                    transition: 'all 0.3s'
+                                    marginBottom: '4px',
+                                    cursor: 'pointer'
                                   }}
+                                  onClick={() => handleCellClick(nurse, day.format('YYYY-MM-DD'), shift.shift, shift.id)}
                                 >
                                   {SHIFT_NAMES[shift.shift]}
                                 </div>
                               )}
+                              {overtimes.map((ot, idx) => (
+                                <div 
+                                  key={idx}
+                                  style={{ 
+                                    padding: '2px 4px', 
+                                    borderRadius: '2px', 
+                                    color: '#fff', 
+                                    fontSize: '10px',
+                                    background: '#fa8c16',
+                                    marginTop: '2px'
+                                  }}
+                                  title={`加班: ${ot.start_time}-${ot.end_time} (${ot.hours}小时)`}
+                                >
+                                  加班{ot.hours}h
+                                </div>
+                              ))}
                             </td>
                           );
                         })}
@@ -306,67 +644,40 @@ function App() {
                 </table>
               </div>
             </div>
+
+            <div style={{ background: '#fff', padding: '24px', borderRadius: '8px' }}>
+              <h3 style={{ marginTop: 0, marginBottom: '16px' }}>月度工时统计</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div>
+                  <h4 style={{ marginTop: 0, marginBottom: '12px' }}>工时对比图</h4>
+                  <ReactECharts 
+                    option={getChartOption()} 
+                    style={{ height: '350px', width: '100%' }}
+                    notMerge={true}
+                    lazyUpdate={true}
+                  />
+                </div>
+                <div>
+                  <h4 style={{ marginTop: 0, marginBottom: '12px' }}>工时明细表</h4>
+                  <Table
+                    columns={reportColumns}
+                    dataSource={monthlyReport}
+                    rowKey="nurse_id"
+                    size="small"
+                    pagination={false}
+                    scroll={{ y: 300 }}
+                  />
+                </div>
+              </div>
+            </div>
           </Content>
           <Sider width={350} theme="light" style={{ borderLeft: '1px solid #e8e8e8' }}>
-            <div style={{ padding: '16px', borderBottom: '1px solid #e8e8e8', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0 }}>换班审批</h3>
-              {pendingCount > 0 && <Badge count={pendingCount} />}
-            </div>
-            <div style={{ padding: '16px', overflowY: 'auto', height: 'calc(100vh - 64px - 53px)' }}>
-              {swapRequests.length === 0 ? (
-                <div style={{ textAlign: 'center', color: '#999', padding: '40px 0' }}>
-                  暂无换班申请
-                </div>
-              ) : (
-                swapRequests.map(req => (
-                  <div 
-                    key={req.id} 
-                    style={{ 
-                      border: '1px solid #e8e8e8', 
-                      borderRadius: '8px', 
-                      padding: '12px', 
-                      marginBottom: '12px',
-                      background: '#fafafa'
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <span style={{ fontWeight: '500' }}>{req.date}</span>
-                      <Tag color={
-                        req.status === 'pending' ? 'gold' :
-                        req.status === 'confirmed' ? 'blue' :
-                        req.status === 'approved' ? 'green' : 'red'
-                      }>
-                        {req.status === 'pending' ? '待确认' :
-                         req.status === 'confirmed' ? '待审批' :
-                         req.status === 'approved' ? '已通过' : '已拒绝'}
-                      </Tag>
-                    </div>
-                    <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
-                      <div>{req.requester_name} ({SHIFT_NAMES[req.requester_shift]}) ↔ {req.target_name} ({SHIFT_NAMES[req.target_shift]})</div>
-                    </div>
-                    {req.status === 'pending' && (
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                        <Button size="small" onClick={() => handleConfirmSwap(req.id)}>
-                          确认
-                        </Button>
-                        <Button size="small" danger onClick={() => handleRejectSwap(req.id)}>
-                          拒绝
-                        </Button>
-                      </div>
-                    )}
-                    {req.status === 'confirmed' && (
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                        <Button size="small" type="primary" onClick={() => handleApproveSwap(req.id)}>
-                          通过
-                        </Button>
-                        <Button size="small" danger onClick={() => handleRejectSwap(req.id)}>
-                          拒绝
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
+            <div style={{ height: 'calc(100vh - 64px)', overflowY: 'auto' }}>
+              <Tabs 
+                defaultActiveKey="swap" 
+                items={rightPanelItems}
+                style={{ padding: '0 16px' }}
+              />
             </div>
           </Sider>
         </Layout>
@@ -396,6 +707,61 @@ function App() {
                 </Option>
               ))}
             </Select>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="申请加班"
+        open={overtimeModalVisible}
+        onOk={handleOvertimeSubmit}
+        onCancel={() => setOvertimeModalVisible(false)}
+        width={500}
+      >
+        <Form form={overtimeForm} layout="vertical">
+          <Form.Item 
+            name="nurse" 
+            label="申请人" 
+            rules={[{ required: true, message: '请选择申请人' }]}
+          >
+            <Select 
+              placeholder="请选择护士" 
+              onChange={(value) => setSelectedOvertimeNurse(value)}
+            >
+              {nurses.map(nurse => (
+                <Option key={nurse.id} value={nurse.id}>
+                  {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                </Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item 
+            name="date" 
+            label="加班日期" 
+            rules={[{ required: true, message: '请选择加班日期' }]}
+          >
+            <DatePicker style={{ width: '100%' }} placeholder="请选择日期" />
+          </Form.Item>
+          <div style={{ display: 'flex', gap: '16px' }}>
+            <Form.Item 
+              name="startTime" 
+              label="开始时间" 
+              rules={[{ required: true, message: '请选择开始时间' }]}
+              style={{ flex: 1 }}
+            >
+              <TimePicker format="HH:mm" style={{ width: '100%' }} placeholder="开始时间" />
+            </Form.Item>
+            <Form.Item 
+              name="endTime" 
+              label="结束时间" 
+              rules={[{ required: true, message: '请选择结束时间' }]}
+              style={{ flex: 1 }}
+            >
+              <TimePicker format="HH:mm" style={{ width: '100%' }} placeholder="结束时间" />
+            </Form.Item>
+          </div>
+          <Form.Item name="reason" label="加班原因">
+            <TextArea rows={3} placeholder="请输入加班原因（可选）" />
           </Form.Item>
         </Form>
       </Modal>
