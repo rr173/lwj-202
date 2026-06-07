@@ -149,6 +149,82 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
   return { success: true, schedule, shiftCounts };
 }
 
+function validateSwap(schedule, nurses, requester_id, target_id, date, requester_shift, target_shift) {
+  const testSchedules = schedule.filter(s => 
+    !(s.nurse_id === requester_id && s.date === date) && 
+    !(s.nurse_id === target_id && s.date === date)
+  );
+  
+  testSchedules.push({
+    nurse_id: target_id,
+    date,
+    shift: requester_shift
+  });
+  testSchedules.push({
+    nurse_id: requester_id,
+    date,
+    shift: target_shift
+  });
+
+  const existingShifts = {};
+  testSchedules.forEach(s => {
+    if (!existingShifts[s.nurse_id]) {
+      existingShifts[s.nurse_id] = {};
+    }
+    existingShifts[s.nurse_id][s.date] = s.shift;
+  });
+
+  const requester = nurses.find(n => n.id === requester_id);
+  const target = nurses.find(n => n.id === target_id);
+
+  if (!requester || !target) {
+    return { valid: false, reason: '护士不存在' };
+  }
+
+  const prevDate = dayjs(date).subtract(1, 'day').format('YYYY-MM-DD');
+  const nextDate = dayjs(date).add(1, 'day').format('YYYY-MM-DD');
+
+  if (target_shift === 'night' && existingShifts[requester_id] && existingShifts[requester_id][prevDate] === 'night') {
+    return { valid: false, reason: `${requester.name} 换班后会连续两天夜班` };
+  }
+
+  if (requester_shift === 'night' && existingShifts[target_id] && existingShifts[target_id][prevDate] === 'night') {
+    return { valid: false, reason: `${target.name} 换班后会连续两天夜班` };
+  }
+
+  if (target_shift === 'morning' && existingShifts[requester_id] && existingShifts[requester_id][prevDate] === 'night') {
+    return { valid: false, reason: `${requester.name} 换班后夜班后接早班，间隔不足8小时` };
+  }
+
+  if (requester_shift === 'morning' && existingShifts[target_id] && existingShifts[target_id][prevDate] === 'night') {
+    return { valid: false, reason: `${target.name} 换班后夜班后接早班，间隔不足8小时` };
+  }
+
+  if (existingShifts[requester_id] && existingShifts[requester_id][nextDate] === 'night' && target_shift === 'night') {
+    return { valid: false, reason: `${requester.name} 换班后会连续两天夜班` };
+  }
+
+  if (existingShifts[target_id] && existingShifts[target_id][nextDate] === 'night' && requester_shift === 'night') {
+    return { valid: false, reason: `${target.name} 换班后会连续两天夜班` };
+  }
+
+  if (existingShifts[requester_id] && existingShifts[requester_id][nextDate] === 'morning' && target_shift === 'night') {
+    return { valid: false, reason: `${requester.name} 换班后夜班后接早班，间隔不足8小时` };
+  }
+
+  if (existingShifts[target_id] && existingShifts[target_id][nextDate] === 'morning' && requester_shift === 'night') {
+    return { valid: false, reason: `${target.name} 换班后夜班后接早班，间隔不足8小时` };
+  }
+
+  const dayShifts = testSchedules.filter(s => s.date === date);
+  const hasSeniorAny = dayShifts.some(s => nurses.find(n => n.id === s.nurse_id)?.level === 'senior');
+  if (!hasSeniorAny) {
+    return { valid: false, reason: `${date} 换班后当天没有senior护士在岗` };
+  }
+
+  return { valid: true };
+}
+
 function validateScheduleChange(schedule, nurses, change) {
   const { nurse_id, date, shift } = change;
   const nurse = nurses.find(n => n.id === nurse_id);
@@ -184,4 +260,4 @@ function validateScheduleChange(schedule, nurses, change) {
   return { valid: true };
 }
 
-module.exports = { generateSchedule, validateScheduleChange, getDaysInMonth };
+module.exports = { generateSchedule, validateScheduleChange, validateSwap, getDaysInMonth };

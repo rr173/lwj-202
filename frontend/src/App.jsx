@@ -147,7 +147,7 @@ function App() {
       message.success('已确认换班');
       loadSwapRequests();
     } catch (err) {
-      message.error('确认失败');
+      message.error(`确认失败: ${err.response?.data?.error || err.message}`);
     }
   };
 
@@ -168,7 +168,7 @@ function App() {
       message.success('已拒绝');
       loadSwapRequests();
     } catch (err) {
-      message.error('操作失败');
+      message.error(`操作失败: ${err.response?.data?.error || err.message}`);
     }
   };
 

@@ -277,45 +277,90 @@ app.put('/api/swap-requests/:id/approve', (req, res) => {
     const { department_id, requester_id, target_id, date, requester_shift, target_shift } = request;
     const month = date.substring(0, 7);
 
-    db.serialize(() => {
-      db.run('BEGIN TRANSACTION');
+    db.all(
+      'SELECT * FROM schedules WHERE department_id = ? AND month = ?',
+      [department_id, month],
+      (err, schedules) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
 
-      db.run(
-        'UPDATE schedules SET nurse_id = ?, shift = ? WHERE department_id = ? AND date = ? AND nurse_id = ? AND shift = ?',
-        [target_id, requester_shift, department_id, date, requester_id, requester_shift],
-        function(err) {
+        db.all('SELECT * FROM nurses WHERE department_id = ?', [department_id], (err, nurses) => {
           if (err) {
-            db.run('ROLLBACK');
             return res.status(500).json({ error: err.message });
           }
 
-          db.run(
-            'UPDATE schedules SET nurse_id = ?, shift = ? WHERE department_id = ? AND date = ? AND nurse_id = ? AND shift = ?',
-            [requester_id, target_shift, department_id, date, target_id, target_shift],
-            function(err) {
-              if (err) {
-                db.run('ROLLBACK');
-                return res.status(500).json({ error: err.message });
-              }
+          const { validateSwap } = require('./scheduler');
+          const validation = validateSwap(schedules, nurses, requester_id, target_id, date, requester_shift, target_shift);
+          
+          if (!validation.valid) {
+            return res.status(400).json({ error: validation.reason });
+          }
 
-              db.run('UPDATE swap_requests SET status = ? WHERE id = ?', ['approved', id], function(err) {
+          db.serialize(() => {
+            db.run('BEGIN TRANSACTION');
+
+            db.run(
+              'DELETE FROM schedules WHERE department_id = ? AND date = ? AND nurse_id = ? AND shift = ?',
+              [department_id, date, requester_id, requester_shift],
+              function(err) {
                 if (err) {
                   db.run('ROLLBACK');
                   return res.status(500).json({ error: err.message });
                 }
 
-                db.run('COMMIT', (err) => {
-                  if (err) {
-                    return res.status(500).json({ error: err.message });
+                db.run(
+                  'DELETE FROM schedules WHERE department_id = ? AND date = ? AND nurse_id = ? AND shift = ?',
+                  [department_id, date, target_id, target_shift],
+                  function(err) {
+                    if (err) {
+                      db.run('ROLLBACK');
+                      return res.status(500).json({ error: err.message });
+                    }
+
+                    db.run(
+                      'INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)',
+                      [department_id, target_id, date, requester_shift, month],
+                      function(err) {
+                        if (err) {
+                          db.run('ROLLBACK');
+                          return res.status(500).json({ error: err.message });
+                        }
+
+                        db.run(
+                          'INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)',
+                          [department_id, requester_id, date, target_shift, month],
+                          function(err) {
+                            if (err) {
+                              db.run('ROLLBACK');
+                              return res.status(500).json({ error: err.message });
+                            }
+
+                            db.run('UPDATE swap_requests SET status = ? WHERE id = ?', ['approved', id], function(err) {
+                              if (err) {
+                                db.run('ROLLBACK');
+                                return res.status(500).json({ error: err.message });
+                              }
+
+                              db.run('COMMIT', (err) => {
+                                if (err) {
+                                  return res.status(500).json({ error: err.message });
+                                }
+                                res.json({ success: true });
+                              });
+                            });
+                          }
+                        );
+                      }
+                    );
                   }
-                  res.json({ success: true });
-                });
-              });
-            }
-          );
-        }
-      );
-    });
+                );
+              }
+            );
+          });
+        });
+      }
+    );
   });
 });
 
