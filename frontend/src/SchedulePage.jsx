@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { 
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
-  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input
+  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip
 } from 'antd';
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
@@ -9,7 +9,9 @@ import {
   getDepartments, getNurses, getSchedule, generateSchedule, updateSchedule,
   getSwapRequests, createSwapRequest, confirmSwapRequest, approveSwapRequest, rejectSwapRequest,
   getOvertimeRequests, createOvertimeRequest, approveOvertimeRequest, rejectOvertimeRequest,
-  getMonthlyReport
+  getMonthlyReport,
+  getLeaveRequests, createLeaveRequest, approveLeaveRequest, rejectLeaveRequest,
+  confirmSubstitute, manualSubstitute, getLeaveSummary, getAvailableSubstitutes
 } from './api';
 
 const { Option } = Select;
@@ -34,6 +36,25 @@ const OVERTIME_STATUS = {
   rejected: { text: '已拒绝', color: 'red' }
 };
 
+const LEAVE_TYPE_NAMES = {
+  personal: '事假',
+  sick: '病假',
+  annual: '年假'
+};
+
+const LEAVE_TYPE_COLORS = {
+  personal: '#ff4d4f',
+  sick: '#fa8c16',
+  annual: '#1890ff'
+};
+
+const SUBSTITUTE_STATUS = {
+  pending: { text: '待确认', color: 'gold' },
+  confirmed: { text: '已确认', color: 'green' },
+  none: { text: '无补班', color: 'default' },
+  manual: { text: '需手动协调', color: 'red' }
+};
+
 function SchedulePage() {
   const [departments, setDepartments] = useState([]);
   const [selectedDept, setSelectedDept] = useState(null);
@@ -43,13 +64,21 @@ function SchedulePage() {
   const [viewMode, setViewMode] = useState('month');
   const [swapRequests, setSwapRequests] = useState([]);
   const [overtimeRequests, setOvertimeRequests] = useState([]);
+  const [leaveRequests, setLeaveRequests] = useState([]);
   const [monthlyReport, setMonthlyReport] = useState([]);
+  const [leaveSummary, setLeaveSummary] = useState([]);
   const [swapModalVisible, setSwapModalVisible] = useState(false);
   const [overtimeModalVisible, setOvertimeModalVisible] = useState(false);
+  const [leaveModalVisible, setLeaveModalVisible] = useState(false);
+  const [substituteModalVisible, setSubstituteModalVisible] = useState(false);
   const [selectedCell, setSelectedCell] = useState(null);
   const [selectedOvertimeNurse, setSelectedOvertimeNurse] = useState(null);
+  const [selectedLeave, setSelectedLeave] = useState(null);
+  const [availableSubstitutes, setAvailableSubstitutes] = useState([]);
+  const [manualSubstituteNurseId, setManualSubstituteNurseId] = useState(null);
   const [form] = Form.useForm();
   const [overtimeForm] = Form.useForm();
+  const [leaveForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -62,7 +91,9 @@ function SchedulePage() {
       loadSchedule();
       loadSwapRequests();
       loadOvertimeRequests();
+      loadLeaveRequests();
       loadMonthlyReport();
+      loadLeaveSummary();
     }
   }, [selectedDept, month]);
 
@@ -118,6 +149,16 @@ function SchedulePage() {
     }
   };
 
+  const loadLeaveRequests = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getLeaveRequests(selectedDept.id, null, month.format('YYYY-MM'));
+      setLeaveRequests(res.data);
+    } catch (err) {
+      message.error('加载请假记录失败');
+    }
+  };
+
   const loadMonthlyReport = async () => {
     if (!selectedDept) return;
     try {
@@ -125,6 +166,16 @@ function SchedulePage() {
       setMonthlyReport(res.data);
     } catch (err) {
       message.error('加载月度报表失败');
+    }
+  };
+
+  const loadLeaveSummary = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getLeaveSummary(selectedDept.id, month.format('YYYY-MM'));
+      setLeaveSummary(res.data);
+    } catch (err) {
+      message.error('加载请假汇总失败');
     }
   };
 
@@ -256,6 +307,97 @@ function SchedulePage() {
     }
   };
 
+  const handleLeaveSubmit = async () => {
+    try {
+      const values = await leaveForm.validateFields();
+      await createLeaveRequest({
+        department_id: selectedDept.id,
+        nurse_id: values.nurse,
+        date: values.date.format('YYYY-MM-DD'),
+        leave_type: values.leaveType,
+        reason: values.reason
+      });
+      message.success('请假申请已提交');
+      setLeaveModalVisible(false);
+      leaveForm.resetFields();
+      loadLeaveRequests();
+    } catch (err) {
+      message.error(`提交失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleApproveLeave = async (id) => {
+    try {
+      const res = await approveLeaveRequest(id);
+      if (res.data.need_manual) {
+        message.warning('无可用补班人选，需要手动协调');
+      } else if (res.data.substitute) {
+        message.success(`请假已审批，推荐补班人: ${res.data.substitute.substitute_name}`);
+      } else {
+        message.success('请假已审批');
+      }
+      loadLeaveRequests();
+      loadSchedule();
+      loadMonthlyReport();
+      loadLeaveSummary();
+    } catch (err) {
+      message.error(`审批失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleRejectLeave = async (id) => {
+    try {
+      await rejectLeaveRequest(id);
+      message.success('已拒绝请假申请');
+      loadLeaveRequests();
+    } catch (err) {
+      message.error(`操作失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleConfirmSubstitute = async (leaveId) => {
+    try {
+      await confirmSubstitute(leaveId);
+      message.success('补班已确认，排班已更新');
+      loadLeaveRequests();
+      loadSchedule();
+      loadMonthlyReport();
+      loadLeaveSummary();
+    } catch (err) {
+      message.error(`确认失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleOpenSubstituteModal = async (leave) => {
+    setSelectedLeave(leave);
+    setManualSubstituteNurseId(null);
+    try {
+      const res = await getAvailableSubstitutes(selectedDept.id, leave.date, leave.nurse_id);
+      setAvailableSubstitutes(res.data);
+    } catch (err) {
+      message.error('获取可用补班人选失败');
+    }
+    setSubstituteModalVisible(true);
+  };
+
+  const handleManualSubstitute = async () => {
+    if (!manualSubstituteNurseId) {
+      message.error('请选择补班护士');
+      return;
+    }
+    try {
+      await manualSubstitute(selectedLeave.id, manualSubstituteNurseId);
+      message.success('手动补班已确认，排班已更新');
+      setSubstituteModalVisible(false);
+      loadLeaveRequests();
+      loadSchedule();
+      loadMonthlyReport();
+      loadLeaveSummary();
+    } catch (err) {
+      message.error(`操作失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
   const getDaysInView = () => {
     const year = month.year();
     const monthNum = month.month();
@@ -285,13 +427,27 @@ function SchedulePage() {
     );
   };
 
+  const getLeaveForNurseAndDate = (nurseId, date) => {
+    return leaveRequests.find(
+      l => l.nurse_id === nurseId && l.date === date.format('YYYY-MM-DD') && l.status === 'approved'
+    );
+  };
+
+  const getSubstituteInfoForDate = (date) => {
+    return leaveRequests.filter(
+      l => l.date === date.format('YYYY-MM-DD') && l.status === 'approved' && l.substitute_status === 'confirmed' && l.substitute_nurse_id
+    );
+  };
+
   const days = getDaysInView();
   const pendingSwapCount = swapRequests.filter(r => r.status === 'pending' || r.status === 'confirmed').length;
   const pendingOvertimeCount = overtimeRequests.filter(r => r.status === 'pending').length;
+  const pendingLeaveCount = leaveRequests.filter(r => r.status === 'pending').length;
 
   const getChartOption = () => {
     const names = monthlyReport.map(r => r.nurse_name);
     const normalHours = monthlyReport.map(r => r.normal_hours);
+    const substituteHours = monthlyReport.map(r => r.substitute_hours || 0);
     const overtimeHours = monthlyReport.map(r => r.overtime_hours);
     
     return {
@@ -300,7 +456,7 @@ function SchedulePage() {
         axisPointer: { type: 'shadow' }
       },
       legend: {
-        data: ['正常工时', '加班工时'],
+        data: ['正常工时', '补班工时', '加班工时'],
         bottom: 0
       },
       grid: {
@@ -326,13 +482,23 @@ function SchedulePage() {
         {
           name: '正常工时',
           type: 'bar',
+          stack: 'total',
           data: normalHours,
           itemStyle: { color: '#1890ff' },
           barWidth: '30%'
         },
         {
+          name: '补班工时',
+          type: 'bar',
+          stack: 'total',
+          data: substituteHours,
+          itemStyle: { color: '#13c2c2' },
+          barWidth: '30%'
+        },
+        {
           name: '加班工时',
           type: 'bar',
+          stack: 'total',
           data: overtimeHours,
           itemStyle: { color: '#fa8c16' },
           barWidth: '30%'
@@ -346,47 +512,222 @@ function SchedulePage() {
       title: '护士姓名',
       dataIndex: 'nurse_name',
       key: 'nurse_name',
-      width: 120
+      width: 100,
+      fixed: 'left'
     },
     {
-      title: '正常班次数',
+      title: '排班班次',
       dataIndex: 'normal_shift_count',
       key: 'normal_shift_count',
-      width: 100,
+      width: 80,
       align: 'center'
     },
     {
-      title: '加班次数',
-      dataIndex: 'overtime_count',
-      key: 'overtime_count',
-      width: 100,
+      title: '请假天数',
+      dataIndex: 'leave_count',
+      key: 'leave_count',
+      width: 80,
+      align: 'center',
+      render: (val) => val > 0 ? <Tag color="red">{val}</Tag> : 0
+    },
+    {
+      title: '补班次数',
+      dataIndex: 'substitute_shifts',
+      key: 'substitute_shifts',
+      width: 80,
+      align: 'center',
+      render: (val) => val > 0 ? <Tag color="cyan">{val}</Tag> : 0
+    },
+    {
+      title: '有效班次',
+      dataIndex: 'effective_shift_count',
+      key: 'effective_shift_count',
+      width: 80,
       align: 'center'
     },
     {
-      title: '正常工时(小时)',
+      title: '正常工时',
       dataIndex: 'normal_hours',
       key: 'normal_hours',
-      width: 120,
+      width: 90,
       align: 'center'
     },
     {
-      title: '加班工时(小时)',
+      title: '补班工时',
+      dataIndex: 'substitute_hours',
+      key: 'substitute_hours',
+      width: 90,
+      align: 'center',
+      render: (val) => val > 0 ? <Tag color="cyan">{val}h</Tag> : '0h'
+    },
+    {
+      title: '加班工时',
       dataIndex: 'overtime_hours',
       key: 'overtime_hours',
-      width: 120,
+      width: 90,
       align: 'center'
     },
     {
-      title: '总工时(小时)',
+      title: '总工时',
       dataIndex: 'total_hours',
       key: 'total_hours',
-      width: 120,
+      width: 80,
       align: 'center',
       render: (text) => <strong>{text}</strong>
     }
   ];
 
+  const leaveSummaryColumns = [
+    {
+      title: '护士',
+      dataIndex: 'nurse_name',
+      key: 'nurse_name',
+      width: 100
+    },
+    {
+      title: '事假',
+      dataIndex: 'personal_days',
+      key: 'personal_days',
+      width: 70,
+      align: 'center',
+      render: (val) => val > 0 ? <Tag color="red">{val}天</Tag> : '0'
+    },
+    {
+      title: '病假',
+      dataIndex: 'sick_days',
+      key: 'sick_days',
+      width: 70,
+      align: 'center',
+      render: (val) => val > 0 ? <Tag color="orange">{val}天</Tag> : '0'
+    },
+    {
+      title: '年假',
+      dataIndex: 'annual_days',
+      key: 'annual_days',
+      width: 70,
+      align: 'center',
+      render: (val) => val > 0 ? <Tag color="blue">{val}天</Tag> : '0'
+    },
+    {
+      title: '请假合计',
+      dataIndex: 'total_leave_days',
+      key: 'total_leave_days',
+      width: 80,
+      align: 'center',
+      render: (val) => <strong>{val}</strong>
+    },
+    {
+      title: '补班次数',
+      dataIndex: 'substitute_count',
+      key: 'substitute_count',
+      width: 80,
+      align: 'center',
+      render: (val) => val > 0 ? <Tag color="cyan">{val}次</Tag> : '0'
+    }
+  ];
+
   const rightPanelItems = [
+    {
+      key: 'leave',
+      label: (
+        <span>
+          请假审批
+          {pendingLeaveCount > 0 && <Badge count={pendingLeaveCount} style={{ marginLeft: 8 }} />}
+        </span>
+      ),
+      children: (
+        <div style={{ padding: '8px 0' }}>
+          {leaveRequests.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#999', padding: '40px 0' }}>
+              暂无请假申请
+            </div>
+          ) : (
+            leaveRequests.map(req => (
+              <div 
+                key={req.id} 
+                style={{ 
+                  border: '1px solid #e8e8e8', 
+                  borderRadius: '8px', 
+                  padding: '12px', 
+                  marginBottom: '12px',
+                  background: '#fafafa'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontWeight: '500' }}>{req.date}</span>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <Tag color={LEAVE_TYPE_COLORS[req.leave_type]}>
+                      {LEAVE_TYPE_NAMES[req.leave_type]}
+                    </Tag>
+                    <Tag color={
+                      req.status === 'pending' ? 'gold' :
+                      req.status === 'approved' ? 'green' : 'red'
+                    }>
+                      {req.status === 'pending' ? '待审批' :
+                       req.status === 'approved' ? '已通过' : '已拒绝'}
+                    </Tag>
+                  </div>
+                </div>
+                <div style={{ fontSize: '14px', color: '#666', marginBottom: '8px' }}>
+                  <div><strong>{req.nurse_name}</strong></div>
+                  {req.reason && <div style={{ fontSize: '12px' }}>原因: {req.reason}</div>}
+                </div>
+                {req.status === 'approved' && (
+                  <div style={{ fontSize: '13px', marginBottom: '8px', padding: '8px', background: '#e6f7ff', borderRadius: '4px', border: '1px solid #91d5ff' }}>
+                    {req.substitute_status === 'pending' && req.substitute_name && (
+                      <div>
+                        <div>推荐补班: <strong>{req.substitute_name}</strong></div>
+                        <div style={{ marginTop: '4px' }}>
+                          <Button size="small" type="primary" onClick={() => handleConfirmSubstitute(req.id)}>
+                            确认补班
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                    {req.substitute_status === 'confirmed' && req.substitute_name && (
+                      <div>补班人: <Tag color="green">{req.substitute_name}</Tag> 已确认</div>
+                    )}
+                    {req.substitute_status === 'none' && (
+                      <div>
+                        <div style={{ color: '#ff4d4f' }}>无可用补班人选，需要手动协调</div>
+                        <div style={{ marginTop: '4px' }}>
+                          <Button size="small" type="primary" onClick={() => handleOpenSubstituteModal(req)}>
+                            手动指定补班
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                    {req.substitute_status === 'manual' && !req.substitute_nurse_id && (
+                      <div>
+                        <div style={{ color: '#fa8c16' }}>待手动协调补班人选</div>
+                        <div style={{ marginTop: '4px' }}>
+                          <Button size="small" type="primary" onClick={() => handleOpenSubstituteModal(req)}>
+                            指定补班人
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                    {!req.substitute_status && (
+                      <div style={{ color: '#999' }}>当天无排班，无需补班</div>
+                    )}
+                  </div>
+                )}
+                {req.status === 'pending' && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                    <Button size="small" type="primary" onClick={() => handleApproveLeave(req.id)}>
+                      通过
+                    </Button>
+                    <Button size="small" danger onClick={() => handleRejectLeave(req.id)}>
+                      拒绝
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )
+    },
     {
       key: 'swap',
       label: (
@@ -553,9 +894,23 @@ function SchedulePage() {
                 <div style={{ width: '16px', height: '16px', background: SHIFT_COLORS.night, borderRadius: '2px' }}></div>
                 <span>夜班</span>
               </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <div style={{ width: '16px', height: '16px', background: '#ff4d4f', borderRadius: '2px' }}></div>
+                <span>请假</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <div style={{ width: '16px', height: '16px', background: '#13c2c2', borderRadius: '2px' }}></div>
+                <span>补班</span>
+              </div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
+            <Button onClick={() => {
+              leaveForm.resetFields();
+              setLeaveModalVisible(true);
+            }}>
+              申请请假
+            </Button>
             <Button onClick={() => {
               setSelectedOvertimeNurse(null);
               overtimeForm.resetFields();
@@ -596,12 +951,25 @@ function SchedulePage() {
                           </div>
                         </td>
                         {days.map(day => {
+                          const dateStr = day.format('YYYY-MM-DD');
                           const shift = getShiftForNurseAndDate(nurse.id, day);
                           const overtimes = getOvertimeForNurseAndDate(nurse.id, day);
+                          const leave = getLeaveForNurseAndDate(nurse.id, day);
+                          const subInfo = getSubstituteInfoForDate(day).find(s => s.substitute_nurse_id === nurse.id);
+
+                          const isLeave = leave && shift;
+                          const isSubstitute = subInfo && !isLeave;
+
                           return (
                             <td 
-                              key={day.format('YYYY-MM-DD')} 
-                              style={{ border: '1px solid #e8e8e8', padding: '4px', textAlign: 'center', verticalAlign: 'top' }}
+                              key={dateStr} 
+                              style={{ 
+                                border: '1px solid #e8e8e8', 
+                                padding: '4px', 
+                                textAlign: 'center', 
+                                verticalAlign: 'top',
+                                background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : 'transparent')
+                              }}
                             >
                               {shift && (
                                 <div 
@@ -610,13 +978,28 @@ function SchedulePage() {
                                     borderRadius: '4px', 
                                     color: '#fff', 
                                     fontSize: '12px',
-                                    background: SHIFT_COLORS[shift.shift],
+                                    background: isLeave ? '#ff4d4f' : (isSubstitute ? '#13c2c2' : SHIFT_COLORS[shift.shift]),
                                     marginBottom: '4px',
-                                    cursor: 'pointer'
+                                    cursor: 'pointer',
+                                    textDecoration: isLeave ? 'line-through' : 'none'
                                   }}
-                                  onClick={() => handleCellClick(nurse, day.format('YYYY-MM-DD'), shift.shift, shift.id)}
+                                  onClick={() => handleCellClick(nurse, dateStr, shift.shift, shift.id)}
                                 >
-                                  {SHIFT_NAMES[shift.shift]}
+                                  {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : (isSubstitute ? `补班(${SHIFT_NAMES[shift.shift]})` : SHIFT_NAMES[shift.shift])}
+                                </div>
+                              )}
+                              {!shift && leave && (
+                                <div 
+                                  style={{ 
+                                    padding: '4px 8px', 
+                                    borderRadius: '4px', 
+                                    color: '#fff', 
+                                    fontSize: '11px',
+                                    background: '#ff4d4f',
+                                    marginBottom: '4px'
+                                  }}
+                                >
+                                  {LEAVE_TYPE_NAMES[leave.leave_type]}
                                 </div>
                               )}
                               {overtimes.map((ot, idx) => (
@@ -645,7 +1028,7 @@ function SchedulePage() {
               </div>
             </div>
 
-            <div style={{ background: '#fff', padding: '24px', borderRadius: '8px' }}>
+            <div style={{ background: '#fff', padding: '24px', borderRadius: '8px', marginBottom: '24px' }}>
               <h3 style={{ marginTop: 0, marginBottom: '16px' }}>月度工时统计</h3>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                 <div>
@@ -670,11 +1053,22 @@ function SchedulePage() {
                 </div>
               </div>
             </div>
+
+            <div style={{ background: '#fff', padding: '24px', borderRadius: '8px' }}>
+              <h3 style={{ marginTop: 0, marginBottom: '16px' }}>请假汇总</h3>
+              <Table
+                columns={leaveSummaryColumns}
+                dataSource={leaveSummary}
+                rowKey="nurse_id"
+                size="small"
+                pagination={false}
+              />
+            </div>
           </Content>
           <Sider width={350} theme="light" style={{ borderLeft: '1px solid #e8e8e8' }}>
             <div style={{ height: 'calc(100vh - 64px)', overflowY: 'auto' }}>
               <Tabs 
-                defaultActiveKey="swap" 
+                defaultActiveKey="leave" 
                 items={rightPanelItems}
                 style={{ padding: '0 16px' }}
               />
@@ -764,6 +1158,99 @@ function SchedulePage() {
             <TextArea rows={3} placeholder="请输入加班原因（可选）" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="申请请假"
+        open={leaveModalVisible}
+        onOk={handleLeaveSubmit}
+        onCancel={() => setLeaveModalVisible(false)}
+        width={500}
+      >
+        <Form form={leaveForm} layout="vertical">
+          <Form.Item 
+            name="nurse" 
+            label="申请人" 
+            rules={[{ required: true, message: '请选择申请人' }]}
+          >
+            <Select placeholder="请选择护士">
+              {nurses.map(nurse => (
+                <Option key={nurse.id} value={nurse.id}>
+                  {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                </Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item 
+            name="date" 
+            label="请假日期" 
+            rules={[{ required: true, message: '请选择请假日期' }]}
+          >
+            <DatePicker style={{ width: '100%' }} placeholder="请选择日期" />
+          </Form.Item>
+          <Form.Item 
+            name="leaveType" 
+            label="请假类型" 
+            rules={[{ required: true, message: '请选择请假类型' }]}
+          >
+            <Select placeholder="请选择请假类型">
+              <Option value="personal">事假</Option>
+              <Option value="sick">病假</Option>
+              <Option value="annual">年假</Option>
+            </Select>
+          </Form.Item>
+          <Form.Item name="reason" label="请假原因">
+            <TextArea rows={3} placeholder="请输入请假原因（可选）" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="手动指定补班人"
+        open={substituteModalVisible}
+        onOk={handleManualSubstitute}
+        onCancel={() => setSubstituteModalVisible(false)}
+        width={450}
+      >
+        <div style={{ marginBottom: '16px' }}>
+          <div><strong>请假护士:</strong> {selectedLeave?.nurse_name}</div>
+          <div><strong>请假日期:</strong> {selectedLeave?.date}</div>
+          <div><strong>请假类型:</strong> {selectedLeave && LEAVE_TYPE_NAMES[selectedLeave.leave_type]}</div>
+        </div>
+        {availableSubstitutes.length > 0 ? (
+          <div>
+            <div style={{ marginBottom: '8px', color: '#666' }}>可用补班人选（按当月班次由少到多排列）:</div>
+            <Select 
+              style={{ width: '100%' }} 
+              placeholder="请选择补班护士"
+              value={manualSubstituteNurseId}
+              onChange={(val) => setManualSubstituteNurseId(val)}
+            >
+              {availableSubstitutes.map(n => (
+                <Option key={n.id} value={n.id}>
+                  {n.name} ({n.level === 'senior' ? '资深' : '普通'}) - 当月{n.shift_count}班次
+                </Option>
+              ))}
+            </Select>
+          </div>
+        ) : (
+          <div style={{ padding: '16px', background: '#fff1f0', borderRadius: '4px', border: '1px solid #ffa39e' }}>
+            <div style={{ color: '#ff4d4f', fontWeight: '500' }}>当前没有可用的补班人选</div>
+            <div style={{ color: '#999', fontSize: '12px', marginTop: '4px' }}>同科室其他护士当天均已有排班或不可用</div>
+            <Select 
+              style={{ width: '100%', marginTop: '12px' }} 
+              placeholder="强制指定其他护士（需自行协调）"
+              value={manualSubstituteNurseId}
+              onChange={(val) => setManualSubstituteNurseId(val)}
+            >
+              {nurses.filter(n => n.id !== selectedLeave?.nurse_id).map(nurse => (
+                <Option key={nurse.id} value={nurse.id}>
+                  {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                </Option>
+              ))}
+            </Select>
+          </div>
+        )}
       </Modal>
     </Layout>
   );

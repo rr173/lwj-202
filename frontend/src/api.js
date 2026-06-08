@@ -38,6 +38,27 @@ export const rejectOvertimeRequest = (id) => api.put(`/overtime-requests/${id}/r
 export const getMonthlyReport = (deptId, month) => 
   api.get(`/departments/${deptId}/monthly-report`, { params: { month } });
 
+export const getLeaveRequests = (deptId, status, month) =>
+  api.get(`/departments/${deptId}/leave-requests`, { params: { status, month } });
+
+export const createLeaveRequest = (data) => api.post('/leave-requests', data);
+
+export const approveLeaveRequest = (id) => api.put(`/leave-requests/${id}/approve`);
+
+export const rejectLeaveRequest = (id) => api.put(`/leave-requests/${id}/reject`);
+
+export const confirmSubstitute = (id, substituteNurseId) =>
+  api.put(`/leave-requests/${id}/confirm-substitute`, { substitute_nurse_id: substituteNurseId });
+
+export const manualSubstitute = (id, substituteNurseId) =>
+  api.put(`/leave-requests/${id}/manual-substitute`, { substitute_nurse_id: substituteNurseId });
+
+export const getLeaveSummary = (deptId, month) =>
+  api.get(`/departments/${deptId}/leave-summary`, { params: { month } });
+
+export const getAvailableSubstitutes = (deptId, date, excludeNurseId) =>
+  api.get(`/departments/${deptId}/available-substitutes`, { params: { date, exclude_nurse_id: excludeNurseId } });
+
 export const getTrainingCourses = (deptId) => 
   api.get(`/departments/${deptId}/training-courses`);
 

@@ -12,6 +12,7 @@ function initDemoData() {
 
     db.run('DELETE FROM swap_requests');
     db.run('DELETE FROM overtime_requests');
+    db.run('DELETE FROM leave_requests');
     db.run('DELETE FROM schedules');
     db.run('DELETE FROM unavailable_dates');
     db.run('DELETE FROM training_records');

@@ -561,31 +561,545 @@ app.get('/api/departments/:id/monthly-report', (req, res) => {
             if (err) {
               return res.status(500).json({ error: err.message });
             }
-            
+
+            db.all(
+              "SELECT nurse_id, COUNT(*) as leave_count FROM leave_requests WHERE department_id = ? AND month = ? AND status = 'approved' GROUP BY nurse_id",
+              [id, month],
+              (err, leaveStats) => {
+                if (err) {
+                  return res.status(500).json({ error: err.message });
+                }
+
+                db.all(
+                  "SELECT substitute_nurse_id, COUNT(*) as substitute_count FROM leave_requests WHERE department_id = ? AND month = ? AND status = 'approved' AND substitute_status = 'confirmed' GROUP BY substitute_nurse_id",
+                  [id, month],
+                  (err, subStats) => {
+                    if (err) {
+                      return res.status(500).json({ error: err.message });
+                    }
+                    
+                    const report = nurses.map(nurse => {
+                      const scheduleStat = scheduleCounts.find(s => s.nurse_id === nurse.id) || { shift_count: 0 };
+                      const overtimeStat = overtimeStats.find(o => o.nurse_id === nurse.id) || { overtime_count: 0, overtime_hours: 0 };
+                      const leaveStat = leaveStats.find(l => l.nurse_id === nurse.id) || { leave_count: 0 };
+                      const subStat = subStats.find(s => s.substitute_nurse_id === nurse.id) || { substitute_count: 0 };
+                      
+                      const leave_count = leaveStat.leave_count || 0;
+                      const substitute_shifts = subStat.substitute_count || 0;
+                      const effective_shift_count = scheduleStat.shift_count - leave_count + substitute_shifts;
+                      const normal_hours = effective_shift_count * 8;
+                      const substitute_hours = substitute_shifts * 8;
+                      const overtime_hours = Math.round((overtimeStat.overtime_hours || 0) * 100) / 100;
+                      
+                      return {
+                        nurse_id: nurse.id,
+                        nurse_name: nurse.name,
+                        nurse_level: nurse.level,
+                        normal_shift_count: scheduleStat.shift_count,
+                        leave_count,
+                        substitute_shifts,
+                        effective_shift_count,
+                        overtime_count: overtimeStat.overtime_count,
+                        normal_hours,
+                        substitute_hours,
+                        overtime_hours,
+                        total_hours: Math.round((normal_hours + overtime_hours) * 100) / 100
+                      };
+                    });
+                    
+                    res.json(report);
+                  });
+              });
+          });
+      });
+  });
+});
+
+app.get('/api/departments/:id/leave-requests', (req, res) => {
+  const { id } = req.params;
+  const { status, month } = req.query;
+
+  let query = `
+    SELECT lr.*, n.name as nurse_name, n.level as nurse_level,
+           sn.name as substitute_name, sn.level as substitute_level
+    FROM leave_requests lr
+    JOIN nurses n ON lr.nurse_id = n.id
+    LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
+    WHERE lr.department_id = ?
+  `;
+  const params = [id];
+
+  if (status) {
+    query += ' AND lr.status = ?';
+    params.push(status);
+  }
+
+  if (month) {
+    query += ' AND lr.month = ?';
+    params.push(month);
+  }
+
+  query += ' ORDER BY lr.created_at DESC';
+
+  db.all(query, params, (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(rows);
+  });
+});
+
+app.post('/api/leave-requests', (req, res) => {
+  const { department_id, nurse_id, date, leave_type, reason } = req.body;
+
+  if (!department_id || !nurse_id || !date || !leave_type) {
+    return res.status(400).json({ error: '请填写完整的请假信息' });
+  }
+
+  if (!['personal', 'sick', 'annual'].includes(leave_type)) {
+    return res.status(400).json({ error: '无效的请假类型' });
+  }
+
+  const month = date.substring(0, 7);
+
+  db.get('SELECT * FROM leave_requests WHERE nurse_id = ? AND date = ? AND status != ?', [nurse_id, date, 'rejected'], (err, existing) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (existing) {
+      return res.status(400).json({ error: '该日期已有请假申请' });
+    }
+
+    db.run(`
+      INSERT INTO leave_requests (department_id, nurse_id, date, leave_type, status, month, reason)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?)
+    `, [department_id, nurse_id, date, leave_type, month, reason || null], function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ id: this.lastID, success: true });
+    });
+  });
+});
+
+app.put('/api/leave-requests/:id/approve', (req, res) => {
+  const { id } = req.params;
+
+  db.get('SELECT * FROM leave_requests WHERE id = ?', [id], (err, request) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!request) {
+      return res.status(404).json({ error: '请假申请不存在' });
+    }
+    if (request.status !== 'pending') {
+      return res.status(400).json({ error: '该申请已处理' });
+    }
+
+    db.get('SELECT * FROM schedules WHERE nurse_id = ? AND date = ?', [request.nurse_id, request.date], (err, schedule) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (!schedule) {
+        db.run('UPDATE leave_requests SET status = ? WHERE id = ?', ['approved', id], function(err) {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+          res.json({ success: true, has_schedule: false });
+        });
+        return;
+      }
+
+      const { department_id, nurse_id, date } = request;
+
+      db.all('SELECT * FROM nurses WHERE department_id = ? AND id != ?', [department_id, nurse_id], (err, nurses) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+
+        const nurseIds = nurses.map(n => n.id);
+        const placeholders = nurseIds.map(() => '?').join(',');
+
+        db.all(`SELECT nurse_id, COUNT(*) as shift_count FROM schedules WHERE department_id = ? AND month = ? AND nurse_id IN (${placeholders}) GROUP BY nurse_id`, [department_id, request.month, ...nurseIds], (err, shiftCounts) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          db.all(`SELECT nurse_id FROM schedules WHERE date = ? AND nurse_id IN (${placeholders})`, [date, ...nurseIds], (err, scheduledNurses) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+
+            const scheduledSet = new Set(scheduledNurses.map(s => s.nurse_id));
+
+            db.all(`SELECT nurse_id FROM unavailable_dates WHERE date = ? AND nurse_id IN (${placeholders})`, [date, ...nurseIds], (err, unavailableNurses) => {
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+
+              const unavailableSet = new Set(unavailableNurses.map(u => u.nurse_id));
+
+              db.all(`SELECT substitute_nurse_id FROM leave_requests WHERE date = ? AND status = 'approved' AND substitute_status = 'confirmed' AND substitute_nurse_id IN (${placeholders})`, [date, ...nurseIds], (err, alreadySubstituting) => {
+                if (err) {
+                  return res.status(500).json({ error: err.message });
+                }
+
+                const substitutingSet = new Set(alreadySubstituting.map(s => s.substitute_nurse_id));
+
+                const availableNurses = nurses.filter(n =>
+                  !scheduledSet.has(n.id) &&
+                  !unavailableSet.has(n.id) &&
+                  !substitutingSet.has(n.id)
+                );
+
+                const countMap = {};
+                shiftCounts.forEach(sc => {
+                  countMap[sc.nurse_id] = sc.shift_count;
+                });
+
+                availableNurses.sort((a, b) => (countMap[a.id] || 0) - (countMap[b.id] || 0));
+
+                const substitute = availableNurses.length > 0 ? availableNurses[0] : null;
+
+                if (substitute) {
+                  db.run('UPDATE leave_requests SET status = ?, substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+                    ['approved', substitute.id, 'pending', id], function(err) {
+                      if (err) {
+                        return res.status(500).json({ error: err.message });
+                      }
+                      db.get(`SELECT lr.*, n.name as nurse_name, sn.name as substitute_name
+                        FROM leave_requests lr
+                        JOIN nurses n ON lr.nurse_id = n.id
+                        LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
+                        WHERE lr.id = ?`, [id], (err, updated) => {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+                        res.json({ success: true, has_schedule: true, substitute: updated });
+                      });
+                    });
+                } else {
+                  db.run('UPDATE leave_requests SET status = ?, substitute_status = ? WHERE id = ?',
+                    ['approved', 'none', id], function(err) {
+                      if (err) {
+                        return res.status(500).json({ error: err.message });
+                      }
+                      db.get(`SELECT lr.*, n.name as nurse_name, sn.name as substitute_name
+                        FROM leave_requests lr
+                        JOIN nurses n ON lr.nurse_id = n.id
+                        LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
+                        WHERE lr.id = ?`, [id], (err, updated) => {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+                        res.json({ success: true, has_schedule: true, substitute: null, leave: updated, need_manual: true });
+                      });
+                    });
+                }
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+app.put('/api/leave-requests/:id/reject', (req, res) => {
+  const { id } = req.params;
+
+  db.get('SELECT * FROM leave_requests WHERE id = ?', [id], (err, request) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!request) {
+      return res.status(404).json({ error: '请假申请不存在' });
+    }
+    if (request.status !== 'pending') {
+      return res.status(400).json({ error: '该申请已处理' });
+    }
+
+    db.run('UPDATE leave_requests SET status = ? WHERE id = ?', ['rejected', id], function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ success: true });
+    });
+  });
+});
+
+app.put('/api/leave-requests/:id/confirm-substitute', (req, res) => {
+  const { id } = req.params;
+  const { substitute_nurse_id } = req.body;
+
+  db.get('SELECT * FROM leave_requests WHERE id = ?', [id], (err, request) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!request) {
+      return res.status(404).json({ error: '请假申请不存在' });
+    }
+    if (request.status !== 'approved') {
+      return res.status(400).json({ error: '请假申请未审批通过' });
+    }
+    if (request.substitute_status === 'confirmed') {
+      return res.status(400).json({ error: '补班已确认' });
+    }
+
+    const finalSubId = substitute_nurse_id || request.substitute_nurse_id;
+
+    if (!finalSubId) {
+      db.run('UPDATE leave_requests SET substitute_status = ? WHERE id = ?', ['manual', id], function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        res.json({ success: true, manual: true });
+      });
+      return;
+    }
+
+    db.get('SELECT * FROM schedules WHERE nurse_id = ? AND date = ?', [request.nurse_id, request.date], (err, schedule) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      db.serialize(() => {
+        db.run('BEGIN TRANSACTION');
+
+        const doConfirm = (scheduleId) => {
+          if (scheduleId) {
+            db.run('UPDATE schedules SET nurse_id = ? WHERE id = ?', [finalSubId, scheduleId], function(err) {
+              if (err) {
+                db.run('ROLLBACK');
+                return res.status(500).json({ error: err.message });
+              }
+              db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+                [finalSubId, 'confirmed', id], function(err) {
+                  if (err) {
+                    db.run('ROLLBACK');
+                    return res.status(500).json({ error: err.message });
+                  }
+                  db.run('COMMIT', (err) => {
+                    if (err) {
+                      return res.status(500).json({ error: err.message });
+                    }
+                    res.json({ success: true });
+                  });
+                });
+            });
+          } else {
+            db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+              [finalSubId, 'confirmed', id], function(err) {
+                if (err) {
+                  db.run('ROLLBACK');
+                  return res.status(500).json({ error: err.message });
+                }
+                db.run('COMMIT', (err) => {
+                  if (err) {
+                    return res.status(500).json({ error: err.message });
+                  }
+                  res.json({ success: true });
+                });
+              });
+          }
+        };
+
+        doConfirm(schedule ? schedule.id : null);
+      });
+    });
+  });
+});
+
+app.put('/api/leave-requests/:id/manual-substitute', (req, res) => {
+  const { id } = req.params;
+  const { substitute_nurse_id } = req.body;
+
+  if (!substitute_nurse_id) {
+    return res.status(400).json({ error: '请选择补班护士' });
+  }
+
+  db.get('SELECT * FROM leave_requests WHERE id = ?', [id], (err, request) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!request) {
+      return res.status(404).json({ error: '请假申请不存在' });
+    }
+    if (request.status !== 'approved') {
+      return res.status(400).json({ error: '请假申请未审批通过' });
+    }
+
+    db.get('SELECT * FROM schedules WHERE nurse_id = ? AND date = ?', [request.nurse_id, request.date], (err, schedule) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      db.serialize(() => {
+        db.run('BEGIN TRANSACTION');
+
+        if (schedule) {
+          db.run('UPDATE schedules SET nurse_id = ? WHERE id = ?', [substitute_nurse_id, schedule.id], function(err) {
+            if (err) {
+              db.run('ROLLBACK');
+              return res.status(500).json({ error: err.message });
+            }
+            db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+              [substitute_nurse_id, 'confirmed', id], function(err) {
+                if (err) {
+                  db.run('ROLLBACK');
+                  return res.status(500).json({ error: err.message });
+                }
+                db.run('COMMIT', (err) => {
+                  if (err) {
+                    return res.status(500).json({ error: err.message });
+                  }
+                  res.json({ success: true });
+                });
+              });
+          });
+        } else {
+          db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+            [substitute_nurse_id, 'confirmed', id], function(err) {
+              if (err) {
+                db.run('ROLLBACK');
+                return res.status(500).json({ error: err.message });
+              }
+              db.run('COMMIT', (err) => {
+                if (err) {
+                  return res.status(500).json({ error: err.message });
+                }
+                res.json({ success: true });
+              });
+            });
+        }
+      });
+    });
+  });
+});
+
+app.get('/api/departments/:id/leave-summary', (req, res) => {
+  const { id } = req.params;
+  const { month } = req.query;
+
+  if (!month) {
+    return res.status(400).json({ error: '请提供月份参数' });
+  }
+
+  db.all('SELECT * FROM nurses WHERE department_id = ?', [id], (err, nurses) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    db.all(
+      `SELECT nurse_id, leave_type, COUNT(*) as days FROM leave_requests
+       WHERE department_id = ? AND month = ? AND status = 'approved'
+       GROUP BY nurse_id, leave_type`,
+      [id, month],
+      (err, leaveStats) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+
+        db.all(
+          `SELECT substitute_nurse_id, COUNT(*) as substitute_count FROM leave_requests
+           WHERE department_id = ? AND month = ? AND status = 'approved' AND substitute_status = 'confirmed'
+           GROUP BY substitute_nurse_id`,
+          [id, month],
+          (err, subStats) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+
             const report = nurses.map(nurse => {
-              const scheduleStat = scheduleCounts.find(s => s.nurse_id === nurse.id) || { shift_count: 0 };
-              const overtimeStat = overtimeStats.find(o => o.nurse_id === nurse.id) || { overtime_count: 0, overtime_hours: 0 };
-              
-              const normal_hours = scheduleStat.shift_count * 8;
-              const overtime_hours = Math.round((overtimeStat.overtime_hours || 0) * 100) / 100;
-              
+              const personalDays = leaveStats.filter(l => l.nurse_id === nurse.id && l.leave_type === 'personal').reduce((sum, l) => sum + l.days, 0);
+              const sickDays = leaveStats.filter(l => l.nurse_id === nurse.id && l.leave_type === 'sick').reduce((sum, l) => sum + l.days, 0);
+              const annualDays = leaveStats.filter(l => l.nurse_id === nurse.id && l.leave_type === 'annual').reduce((sum, l) => sum + l.days, 0);
+              const totalLeaveDays = personalDays + sickDays + annualDays;
+
+              const subStat = subStats.find(s => s.substitute_nurse_id === nurse.id);
+              const substituteCount = subStat ? subStat.substitute_count : 0;
+
               return {
                 nurse_id: nurse.id,
                 nurse_name: nurse.name,
                 nurse_level: nurse.level,
-                normal_shift_count: scheduleStat.shift_count,
-                overtime_count: overtimeStat.overtime_count,
-                normal_hours,
-                overtime_hours,
-                total_hours: Math.round((normal_hours + overtime_hours) * 100) / 100
+                personal_days: personalDays,
+                sick_days: sickDays,
+                annual_days: annualDays,
+                total_leave_days: totalLeaveDays,
+                substitute_count: substituteCount
               };
             });
-            
+
             res.json(report);
           }
         );
       }
     );
+  });
+});
+
+app.get('/api/departments/:id/available-substitutes', (req, res) => {
+  const { id } = req.params;
+  const { date, exclude_nurse_id } = req.query;
+
+  if (!date || !exclude_nurse_id) {
+    return res.status(400).json({ error: '请提供日期和排除护士ID' });
+  }
+
+  const month = date.substring(0, 7);
+
+  db.all('SELECT * FROM nurses WHERE department_id = ? AND id != ?', [id, exclude_nurse_id], (err, nurses) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    const nurseIds = nurses.map(n => n.id);
+    if (nurseIds.length === 0) {
+      return res.json([]);
+    }
+
+    const placeholders = nurseIds.map(() => '?').join(',');
+
+    db.all(`SELECT nurse_id, COUNT(*) as shift_count FROM schedules WHERE department_id = ? AND month = ? AND nurse_id IN (${placeholders}) GROUP BY nurse_id`, [id, month, ...nurseIds], (err, shiftCounts) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      db.all(`SELECT nurse_id FROM schedules WHERE date = ? AND nurse_id IN (${placeholders})`, [date, ...nurseIds], (err, scheduledNurses) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+
+        const scheduledSet = new Set(scheduledNurses.map(s => s.nurse_id));
+
+        db.all(`SELECT nurse_id FROM unavailable_dates WHERE date = ? AND nurse_id IN (${placeholders})`, [date, ...nurseIds], (err, unavailableNurses) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+
+          const unavailableSet = new Set(unavailableNurses.map(u => u.nurse_id));
+
+          const countMap = {};
+          shiftCounts.forEach(sc => {
+            countMap[sc.nurse_id] = sc.shift_count;
+          });
+
+          const available = nurses
+            .filter(n => !scheduledSet.has(n.id) && !unavailableSet.has(n.id))
+            .map(n => ({
+              id: n.id,
+              name: n.name,
+              level: n.level,
+              shift_count: countMap[n.id] || 0
+            }))
+            .sort((a, b) => a.shift_count - b.shift_count);
+
+          res.json(available);
+        });
+      });
+    });
   });
 });
 

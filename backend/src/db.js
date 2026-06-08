@@ -73,6 +73,23 @@ db.serialize(() => {
     FOREIGN KEY (nurse_id) REFERENCES nurses(id)
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS leave_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    leave_type TEXT NOT NULL CHECK(leave_type IN ('personal', 'sick', 'annual')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    substitute_nurse_id INTEGER,
+    substitute_status TEXT CHECK(substitute_status IN ('pending', 'confirmed', 'none', 'manual')),
+    reason TEXT,
+    month TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (substitute_nurse_id) REFERENCES nurses(id)
+  )`);
+
   db.run(`CREATE TABLE IF NOT EXISTS training_courses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     department_id INTEGER NOT NULL,
