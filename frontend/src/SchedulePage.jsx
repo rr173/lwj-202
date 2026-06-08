@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { 
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
-  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip
+  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert
 } from 'antd';
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
@@ -11,7 +11,8 @@ import {
   getOvertimeRequests, createOvertimeRequest, approveOvertimeRequest, rejectOvertimeRequest,
   getMonthlyReport,
   getLeaveRequests, createLeaveRequest, approveLeaveRequest, rejectLeaveRequest,
-  confirmSubstitute, manualSubstitute, getLeaveSummary, getAvailableSubstitutes
+  confirmSubstitute, manualSubstitute, getLeaveSummary, getAvailableSubstitutes,
+  getFatigueStatus
 } from './api';
 
 const { Option } = Select;
@@ -55,6 +56,37 @@ const SUBSTITUTE_STATUS = {
   manual: { text: '需手动协调', color: 'red' }
 };
 
+function FatigueWarningBanner({ fatigueData, expanded, onToggle }) {
+  const warningNurses = (fatigueData || []).filter(n => n.is_fatigue_warning);
+  if (warningNurses.length === 0) return null;
+
+  return (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: '16px', cursor: 'pointer' }}
+      message={
+        <div onClick={onToggle} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>
+            <strong>疲劳预警</strong>：当前有 <strong style={{ color: '#fa8c16' }}>{warningNurses.length}</strong> 名护士近7日累计工时超过48小时
+          </span>
+          <span style={{ fontSize: '12px', color: '#999' }}>{expanded ? '收起 ▲' : '展开详情 ▼'}</span>
+        </div>
+      }
+      description={expanded ? (
+        <div style={{ marginTop: '8px' }}>
+          {warningNurses.map(n => (
+            <div key={n.nurse_id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px dashed #ffe7ba' }}>
+              <span style={{ fontWeight: '500', color: '#fa8c16' }}>{n.nurse_name}</span>
+              <span>近7日累计 <strong style={{ color: '#fa8c16' }}>{n.total_hours}h</strong></span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    />
+  );
+}
+
 function SchedulePage() {
   const [departments, setDepartments] = useState([]);
   const [selectedDept, setSelectedDept] = useState(null);
@@ -80,6 +112,16 @@ function SchedulePage() {
   const [overtimeForm] = Form.useForm();
   const [leaveForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const [fatigueData, setFatigueData] = useState([]);
+  const [fatigueBannerExpanded, setFatigueBannerExpanded] = useState(false);
+  const [approveConfirmVisible, setApproveConfirmVisible] = useState(false);
+  const [approveAction, setApproveAction] = useState(null);
+  const [approveWarnings, setApproveWarnings] = useState([]);
+
+  const fatigueMap = {};
+  (fatigueData || []).forEach(f => {
+    fatigueMap[f.nurse_id] = f;
+  });
 
   useEffect(() => {
     loadDepartments();
@@ -94,6 +136,7 @@ function SchedulePage() {
       loadLeaveRequests();
       loadMonthlyReport();
       loadLeaveSummary();
+      loadFatigueStatus();
     }
   }, [selectedDept, month]);
 
@@ -179,14 +222,29 @@ function SchedulePage() {
     }
   };
 
+  const loadFatigueStatus = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getFatigueStatus(selectedDept.id);
+      setFatigueData(res.data.nurses || []);
+    } catch (err) {
+      setFatigueData([]);
+    }
+  };
+
   const handleGenerateSchedule = async () => {
     if (!selectedDept) return;
     setLoading(true);
     try {
       const res = await generateSchedule(selectedDept.id, month.format('YYYY-MM'));
       message.success('排班生成成功');
+      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
+        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
+        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
+      }
       loadSchedule();
       loadMonthlyReport();
+      loadFatigueStatus();
     } catch (err) {
       message.error(`排班生成失败: ${err.response?.data?.error || err.message}`);
     }
@@ -241,12 +299,34 @@ function SchedulePage() {
   };
 
   const handleApproveSwap = async (id) => {
+    const req = swapRequests.find(r => r.id === id);
+    if (req) {
+      const affectedIds = [req.requester_id, req.target_id];
+      const warnings = affectedIds
+        .map(nid => fatigueMap[nid])
+        .filter(f => f && f.is_fatigue_warning);
+      if (warnings.length > 0) {
+        setApproveAction({ type: 'swap', id });
+        setApproveWarnings(warnings);
+        setApproveConfirmVisible(true);
+        return;
+      }
+    }
+    doApproveSwap(id);
+  };
+
+  const doApproveSwap = async (id) => {
     try {
-      await approveSwapRequest(id);
+      const res = await approveSwapRequest(id);
       message.success('审批通过');
+      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
+        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
+        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
+      }
       loadSwapRequests();
       loadSchedule();
       loadMonthlyReport();
+      loadFatigueStatus();
     } catch (err) {
       message.error(`审批失败: ${err.response?.data?.error || err.message}`);
     }
@@ -287,11 +367,30 @@ function SchedulePage() {
   };
 
   const handleApproveOvertime = async (id) => {
+    const req = overtimeRequests.find(r => r.id === id);
+    if (req) {
+      const f = fatigueMap[req.nurse_id];
+      if (f && f.is_fatigue_warning) {
+        setApproveAction({ type: 'overtime', id });
+        setApproveWarnings([f]);
+        setApproveConfirmVisible(true);
+        return;
+      }
+    }
+    doApproveOvertime(id);
+  };
+
+  const doApproveOvertime = async (id) => {
     try {
-      await approveOvertimeRequest(id);
+      const res = await approveOvertimeRequest(id);
       message.success('审批通过');
+      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
+        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
+        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
+      }
       loadOvertimeRequests();
       loadMonthlyReport();
+      loadFatigueStatus();
     } catch (err) {
       message.error(`审批失败: ${err.response?.data?.error || err.message}`);
     }
@@ -329,6 +428,10 @@ function SchedulePage() {
   const handleApproveLeave = async (id) => {
     try {
       const res = await approveLeaveRequest(id);
+      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
+        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
+        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
+      }
       if (res.data.need_manual) {
         message.warning('无可用补班人选，需要手动协调');
       } else if (res.data.substitute) {
@@ -340,6 +443,7 @@ function SchedulePage() {
       loadSchedule();
       loadMonthlyReport();
       loadLeaveSummary();
+      loadFatigueStatus();
     } catch (err) {
       message.error(`审批失败: ${err.response?.data?.error || err.message}`);
     }
@@ -356,13 +460,32 @@ function SchedulePage() {
   };
 
   const handleConfirmSubstitute = async (leaveId) => {
+    const leaveReq = leaveRequests.find(l => l.id === leaveId);
+    if (leaveReq && leaveReq.substitute_nurse_id) {
+      const f = fatigueMap[leaveReq.substitute_nurse_id];
+      if (f && f.is_fatigue_warning) {
+        setApproveAction({ type: 'substitute', id: leaveId });
+        setApproveWarnings([f]);
+        setApproveConfirmVisible(true);
+        return;
+      }
+    }
+    doConfirmSubstitute(leaveId);
+  };
+
+  const doConfirmSubstitute = async (leaveId) => {
     try {
-      await confirmSubstitute(leaveId);
+      const res = await confirmSubstitute(leaveId);
       message.success('补班已确认，排班已更新');
+      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
+        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
+        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
+      }
       loadLeaveRequests();
       loadSchedule();
       loadMonthlyReport();
       loadLeaveSummary();
+      loadFatigueStatus();
     } catch (err) {
       message.error(`确认失败: ${err.response?.data?.error || err.message}`);
     }
@@ -385,17 +508,55 @@ function SchedulePage() {
       message.error('请选择补班护士');
       return;
     }
+    const f = fatigueMap[manualSubstituteNurseId];
+    if (f && f.is_fatigue_warning) {
+      setApproveAction({ type: 'manualSub', id: selectedLeave.id, nurseId: manualSubstituteNurseId });
+      setApproveWarnings([f]);
+      setApproveConfirmVisible(true);
+      return;
+    }
+    doManualSubstitute();
+  };
+
+  const doManualSubstitute = async () => {
     try {
-      await manualSubstitute(selectedLeave.id, manualSubstituteNurseId);
+      const res = await manualSubstitute(selectedLeave.id, manualSubstituteNurseId);
       message.success('手动补班已确认，排班已更新');
+      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
+        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
+        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
+      }
       setSubstituteModalVisible(false);
       loadLeaveRequests();
       loadSchedule();
       loadMonthlyReport();
       loadLeaveSummary();
+      loadFatigueStatus();
     } catch (err) {
       message.error(`操作失败: ${err.response?.data?.error || err.message}`);
     }
+  };
+
+  const handleApproveConfirmOk = () => {
+    setApproveConfirmVisible(false);
+    if (!approveAction) return;
+    if (approveAction.type === 'swap') {
+      doApproveSwap(approveAction.id);
+    } else if (approveAction.type === 'overtime') {
+      doApproveOvertime(approveAction.id);
+    } else if (approveAction.type === 'substitute') {
+      doConfirmSubstitute(approveAction.id);
+    } else if (approveAction.type === 'manualSub') {
+      doManualSubstitute();
+    }
+    setApproveAction(null);
+    setApproveWarnings([]);
+  };
+
+  const handleApproveConfirmCancel = () => {
+    setApproveConfirmVisible(false);
+    setApproveAction(null);
+    setApproveWarnings([]);
   };
 
   const getDaysInView = () => {
@@ -684,6 +845,11 @@ function SchedulePage() {
                     {req.substitute_status === 'pending' && req.substitute_name && (
                       <div>
                         <div>推荐补班: <strong>{req.substitute_name}</strong></div>
+                        {fatigueMap[req.substitute_nurse_id]?.is_fatigue_warning && (
+                          <div style={{ color: '#fa8c16', fontSize: '12px', marginTop: '2px' }}>
+                            ⚠ {req.substitute_name} 近7日累计{fatigueMap[req.substitute_nurse_id].total_hours}小时，已达疲劳预警
+                          </div>
+                        )}
                         <div style={{ marginTop: '4px' }}>
                           <Button size="small" type="primary" onClick={() => handleConfirmSubstitute(req.id)}>
                             确认补班
@@ -776,6 +942,19 @@ function SchedulePage() {
                 <div style={{ fontSize: '14px', color: '#666', marginBottom: '12px' }}>
                   <div>{req.requester_name} ({SHIFT_NAMES[req.requester_shift]}) ↔ {req.target_name} ({SHIFT_NAMES[req.target_shift]})</div>
                 </div>
+                {req.status === 'confirmed' && (() => {
+                  const warnings = [req.requester_id, req.target_id]
+                    .map(nid => fatigueMap[nid])
+                    .filter(f => f && f.is_fatigue_warning);
+                  if (warnings.length > 0) {
+                    return (
+                      <div style={{ padding: '6px 8px', background: '#fff7e6', border: '1px solid #ffd591', borderRadius: '4px', marginBottom: '8px', fontSize: '12px', color: '#fa8c16' }}>
+                        ⚠ 疲劳预警：{warnings.map(w => `${w.nurse_name}近7日${w.total_hours}h`).join('、')}
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
                 {req.status === 'pending' && (
                   <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
                     <Button size="small" onClick={() => handleConfirmSwap(req.id)}>
@@ -839,6 +1018,11 @@ function SchedulePage() {
                   <div>时段: {req.start_time} - {req.end_time} ({req.hours}小时)</div>
                   {req.reason && <div>原因: {req.reason}</div>}
                 </div>
+                {req.status === 'pending' && fatigueMap[req.nurse_id]?.is_fatigue_warning && (
+                  <div style={{ padding: '6px 8px', background: '#fff7e6', border: '1px solid #ffd591', borderRadius: '4px', marginBottom: '8px', fontSize: '12px', color: '#fa8c16' }}>
+                    ⚠ 疲劳预警：{req.nurse_name} 近7日累计{fatigueMap[req.nurse_id].total_hours}小时
+                  </div>
+                )}
                 {req.status === 'pending' && (
                   <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
                     <Button size="small" type="primary" onClick={() => handleApproveOvertime(req.id)}>
@@ -909,6 +1093,10 @@ function SchedulePage() {
                 <div style={{ width: '16px', height: '16px', background: '#13c2c2', borderRadius: '2px' }}></div>
                 <span>补班</span>
               </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <div style={{ width: '16px', height: '16px', background: '#fa8c16', borderRadius: '2px' }}></div>
+                <span>疲劳预警</span>
+              </div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
@@ -932,6 +1120,11 @@ function SchedulePage() {
         </Header>
         <Layout>
           <Content style={{ padding: '24px', overflow: 'auto' }}>
+            <FatigueWarningBanner 
+              fatigueData={fatigueData} 
+              expanded={fatigueBannerExpanded} 
+              onToggle={() => setFatigueBannerExpanded(!fatigueBannerExpanded)} 
+            />
             <div style={{ background: '#fff', padding: '24px', borderRadius: '8px', marginBottom: '24px' }}>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: days.length * 70 + 150 }}>
@@ -949,102 +1142,113 @@ function SchedulePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {nurses.map(nurse => (
-                      <tr key={nurse.id}>
-                        <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left' }}>
-                          <div>{nurse.name}</div>
-                          <div style={{ fontSize: '12px', color: nurse.level === 'senior' ? '#fa8c16' : '#999' }}>
-                            {nurse.level === 'senior' ? '资深' : '普通'}
-                          </div>
-                        </td>
-                        {days.map(day => {
-                          const dateStr = day.format('YYYY-MM-DD');
-                          const shift = getShiftForNurseAndDate(nurse.id, day);
-                          const overtimes = getOvertimeForNurseAndDate(nurse.id, day);
-                          const leave = getLeaveForNurseAndDate(nurse.id, day);
-                          const subInfo = getSubstituteInfoForDate(day).find(s => s.substitute_nurse_id === nurse.id);
-                          const subOriginalShift = subInfo ? getSubstituteShiftForDate(nurse.id, day) : null;
+                    {nurses.map(nurse => {
+                      const isFatigue = fatigueMap[nurse.id]?.is_fatigue_warning;
+                      const fatigueHours = fatigueMap[nurse.id]?.total_hours;
+                      return (
+                        <tr key={nurse.id}>
+                          <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left', background: isFatigue ? '#fff7e6' : 'transparent' }}>
+                            <Tooltip title={isFatigue ? `近7日累计${fatigueHours}小时` : ''}>
+                              <span style={{ color: isFatigue ? '#fa8c16' : 'inherit', fontWeight: isFatigue ? '600' : 'normal' }}>
+                                {nurse.name}
+                              </span>
+                            </Tooltip>
+                            <div style={{ fontSize: '12px', color: nurse.level === 'senior' ? '#fa8c16' : '#999' }}>
+                              {nurse.level === 'senior' ? '资深' : '普通'}
+                            </div>
+                            {isFatigue && (
+                              <div style={{ fontSize: '11px', color: '#fa8c16', marginTop: '2px' }}>⚠ 疲劳预警</div>
+                            )}
+                          </td>
+                          {days.map(day => {
+                            const dateStr = day.format('YYYY-MM-DD');
+                            const shift = getShiftForNurseAndDate(nurse.id, day);
+                            const overtimes = getOvertimeForNurseAndDate(nurse.id, day);
+                            const leave = getLeaveForNurseAndDate(nurse.id, day);
+                            const subInfo = getSubstituteInfoForDate(day).find(s => s.substitute_nurse_id === nurse.id);
+                            const subOriginalShift = subInfo ? getSubstituteShiftForDate(nurse.id, day) : null;
 
-                          const isLeave = leave && shift;
-                          const isSubstitute = subInfo && !isLeave;
+                            const isLeave = leave && shift;
+                            const isSubstitute = subInfo && !isLeave;
 
-                          return (
-                            <td 
-                              key={dateStr} 
-                              style={{ 
-                                border: '1px solid #e8e8e8', 
-                                padding: '4px', 
-                                textAlign: 'center', 
-                                verticalAlign: 'top',
-                                background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : 'transparent')
-                              }}
-                            >
-                              {shift && !isSubstitute && (
-                                <div 
-                                  style={{ 
-                                    padding: '4px 8px', 
-                                    borderRadius: '4px', 
-                                    color: '#fff', 
-                                    fontSize: '12px',
-                                    background: isLeave ? '#ff4d4f' : SHIFT_COLORS[shift.shift],
-                                    marginBottom: '4px',
-                                    cursor: 'pointer',
-                                    textDecoration: isLeave ? 'line-through' : 'none'
-                                  }}
-                                  onClick={() => handleCellClick(nurse, dateStr, shift.shift, shift.id)}
-                                >
-                                  {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : SHIFT_NAMES[shift.shift]}
-                                </div>
-                              )}
-                              {isSubstitute && (
-                                <div 
-                                  style={{ 
-                                    padding: '4px 8px', 
-                                    borderRadius: '4px', 
-                                    color: '#fff', 
-                                    fontSize: '12px',
-                                    background: '#13c2c2',
-                                    marginBottom: '4px'
-                                  }}
-                                >
-                                  补班({subOriginalShift ? SHIFT_NAMES[subOriginalShift.shift] : '—'})
-                                </div>
-                              )}
-                              {!shift && leave && !isSubstitute && (
-                                <div 
-                                  style={{ 
-                                    padding: '4px 8px', 
-                                    borderRadius: '4px', 
-                                    color: '#fff', 
-                                    fontSize: '11px',
-                                    background: '#ff4d4f',
-                                    marginBottom: '4px'
-                                  }}
-                                >
-                                  {LEAVE_TYPE_NAMES[leave.leave_type]}
-                                </div>
-                              )}
-                              {overtimes.map((ot, idx) => (
-                                <div 
-                                  key={idx}
-                                  style={{ 
-                                    padding: '2px 4px', 
-                                    borderRadius: '2px', 
-                                    color: '#fff', 
-                                    fontSize: '10px',
-                                    background: '#fa8c16',
-                                    marginTop: '2px'
-                                  }}
-                                  title={`加班: ${ot.start_time}-${ot.end_time} (${ot.hours}小时)`}
-                                >
-                                  加班{ot.hours}h
-                                </div>
-                              ))}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
+                            return (
+                              <td 
+                                key={dateStr} 
+                                style={{ 
+                                  border: '1px solid #e8e8e8', 
+                                  padding: '4px', 
+                                  textAlign: 'center', 
+                                  verticalAlign: 'top',
+                                  background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : (isFatigue ? '#fffbe6' : 'transparent'))
+                                }}
+                              >
+                                {shift && !isSubstitute && (
+                                  <div 
+                                    style={{ 
+                                      padding: '4px 8px', 
+                                      borderRadius: '4px', 
+                                      color: '#fff', 
+                                      fontSize: '12px',
+                                      background: isLeave ? '#ff4d4f' : SHIFT_COLORS[shift.shift],
+                                      marginBottom: '4px',
+                                      cursor: 'pointer',
+                                      textDecoration: isLeave ? 'line-through' : 'none'
+                                    }}
+                                    onClick={() => handleCellClick(nurse, dateStr, shift.shift, shift.id)}
+                                  >
+                                    {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : SHIFT_NAMES[shift.shift]}
+                                  </div>
+                                )}
+                                {isSubstitute && (
+                                  <div 
+                                    style={{ 
+                                      padding: '4px 8px', 
+                                      borderRadius: '4px', 
+                                      color: '#fff', 
+                                      fontSize: '12px',
+                                      background: '#13c2c2',
+                                      marginBottom: '4px'
+                                    }}
+                                  >
+                                    补班({subOriginalShift ? SHIFT_NAMES[subOriginalShift.shift] : '—'})
+                                  </div>
+                                )}
+                                {!shift && leave && !isSubstitute && (
+                                  <div 
+                                    style={{ 
+                                      padding: '4px 8px', 
+                                      borderRadius: '4px', 
+                                      color: '#fff', 
+                                      fontSize: '11px',
+                                      background: '#ff4d4f',
+                                      marginBottom: '4px'
+                                    }}
+                                  >
+                                    {LEAVE_TYPE_NAMES[leave.leave_type]}
+                                  </div>
+                                )}
+                                {overtimes.map((ot, idx) => (
+                                  <div 
+                                    key={idx}
+                                    style={{ 
+                                      padding: '2px 4px', 
+                                      borderRadius: '2px', 
+                                      color: '#fff', 
+                                      fontSize: '10px',
+                                      background: '#fa8c16',
+                                      marginTop: '2px'
+                                    }}
+                                    title={`加班: ${ot.start_time}-${ot.end_time} (${ot.hours}小时)`}
+                                  >
+                                    加班{ot.hours}h
+                                  </div>
+                                ))}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1120,6 +1324,7 @@ function SchedulePage() {
               {nurses.filter(n => n.id !== selectedCell?.nurse?.id).map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                  {fatigueMap[nurse.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}
             </Select>
@@ -1147,6 +1352,7 @@ function SchedulePage() {
               {nurses.map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                  {fatigueMap[nurse.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}
             </Select>
@@ -1199,6 +1405,7 @@ function SchedulePage() {
               {nurses.map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                  {fatigueMap[nurse.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}
             </Select>
@@ -1251,6 +1458,7 @@ function SchedulePage() {
               {availableSubstitutes.map(n => (
                 <Option key={n.id} value={n.id}>
                   {n.name} ({n.level === 'senior' ? '资深' : '普通'}) - 当月{n.shift_count}班次
+                  {fatigueMap[n.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}
             </Select>
@@ -1268,11 +1476,36 @@ function SchedulePage() {
               {nurses.filter(n => n.id !== selectedLeave?.nurse_id).map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                  {fatigueMap[nurse.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}
             </Select>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        title="疲劳预警确认"
+        open={approveConfirmVisible}
+        onOk={handleApproveConfirmOk}
+        onCancel={handleApproveConfirmCancel}
+        okText="确认继续"
+        cancelText="取消"
+      >
+        <div style={{ marginBottom: '12px' }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="该操作会导致以下护士进入或继续处于疲劳预警状态（近7日累计工时超过48小时），请知悉："
+            style={{ marginBottom: '12px' }}
+          />
+          {approveWarnings.map(w => (
+            <div key={w.nurse_id} style={{ padding: '8px 12px', background: '#fff7e6', border: '1px solid #ffd591', borderRadius: '4px', marginBottom: '8px' }}>
+              <div style={{ fontWeight: '600', color: '#fa8c16' }}>{w.nurse_name}</div>
+              <div style={{ fontSize: '13px', color: '#666' }}>近7日累计工时：<strong style={{ color: '#fa8c16' }}>{w.total_hours}小时</strong></div>
+            </div>
+          ))}
+        </div>
       </Modal>
     </Layout>
   );

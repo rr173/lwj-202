@@ -1,8 +1,181 @@
 const express = require('express');
 const cors = require('cors');
+const dayjs = require('dayjs');
 const db = require('./db');
 const { generateSchedule, validateScheduleChange, getDaysInMonth } = require('./scheduler');
 const trainingRouter = require('./training');
+
+const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
+const FATIGUE_THRESHOLD = 48;
+
+function compute7DayHours(db, departmentId, referenceDate) {
+  return new Promise((resolve, reject) => {
+    const endDate = referenceDate;
+    const startDate = dayjs(referenceDate).subtract(6, 'day').format('YYYY-MM-DD');
+
+    db.all('SELECT * FROM nurses WHERE department_id = ?', [departmentId], (err, nurses) => {
+      if (err) return reject(err);
+
+      const nurseIds = nurses.map(n => n.id);
+      if (nurseIds.length === 0) return resolve([]);
+
+      const placeholders = nurseIds.map(() => '?').join(',');
+
+      db.all(
+        `SELECT nurse_id, date, shift FROM schedules WHERE department_id = ? AND date >= ? AND date <= ? AND nurse_id IN (${placeholders})`,
+        [departmentId, startDate, endDate, ...nurseIds],
+        (err, schedules) => {
+          if (err) return reject(err);
+
+          db.all(
+            `SELECT nurse_id, date, hours FROM overtime_requests WHERE department_id = ? AND date >= ? AND date <= ? AND status = 'approved' AND nurse_id IN (${placeholders})`,
+            [departmentId, startDate, endDate, ...nurseIds],
+            (err, overtimes) => {
+              if (err) return reject(err);
+
+              db.all(
+                `SELECT substitute_nurse_id, date FROM leave_requests WHERE department_id = ? AND date >= ? AND date <= ? AND status = 'approved' AND substitute_status = 'confirmed' AND substitute_nurse_id IN (${placeholders})`,
+                [departmentId, startDate, endDate, ...nurseIds],
+                (err, substitutes) => {
+                  if (err) return reject(err);
+
+                  db.all(
+                    `SELECT nurse_id, date FROM leave_requests WHERE department_id = ? AND date >= ? AND date <= ? AND status = 'approved' AND nurse_id IN (${placeholders})`,
+                    [departmentId, startDate, endDate, ...nurseIds],
+                    (err, leaves) => {
+                      if (err) return reject(err);
+
+                      const leaveSet = new Set(leaves.map(l => `${l.nurse_id}_${l.date}`));
+                      const substituteSet = new Set(substitutes.map(s => `${s.substitute_nurse_id}_${s.date}`));
+
+                      const result = nurses.map(nurse => {
+                        let totalHours = 0;
+
+                        const nurseSchedules = schedules.filter(s => s.nurse_id === nurse.id);
+                        nurseSchedules.forEach(s => {
+                          const isLeave = leaveSet.has(`${s.nurse_id}_${s.date}`);
+                          if (!isLeave) {
+                            totalHours += SHIFT_HOURS[s.shift] || 8;
+                          }
+                        });
+
+                        const nurseSubstitutes = substitutes.filter(s => s.substitute_nurse_id === nurse.id);
+                        nurseSubstitutes.forEach(() => {
+                          totalHours += 8;
+                        });
+
+                        const nurseOvertimes = overtimes.filter(o => o.nurse_id === nurse.id);
+                        nurseOvertimes.forEach(o => {
+                          totalHours += o.hours;
+                        });
+
+                        totalHours = Math.round(totalHours * 100) / 100;
+
+                        return {
+                          nurse_id: nurse.id,
+                          nurse_name: nurse.name,
+                          nurse_level: nurse.level,
+                          total_hours: totalHours,
+                          is_fatigue_warning: totalHours > FATIGUE_THRESHOLD,
+                          period_start: startDate,
+                          period_end: endDate
+                        };
+                      });
+
+                      resolve(result);
+                    }
+                  );
+                }
+              );
+            }
+          );
+        }
+      );
+    });
+  });
+}
+
+function compute7DayHoursForNurses(db, nurseIds, departmentId, referenceDate) {
+  return new Promise((resolve, reject) => {
+    if (nurseIds.length === 0) return resolve([]);
+
+    const endDate = referenceDate;
+    const startDate = dayjs(referenceDate).subtract(6, 'day').format('YYYY-MM-DD');
+    const placeholders = nurseIds.map(() => '?').join(',');
+
+    db.all(
+      `SELECT id, name, level FROM nurses WHERE id IN (${placeholders})`,
+      nurseIds,
+      (err, nurses) => {
+        if (err) return reject(err);
+
+        db.all(
+          `SELECT nurse_id, date, shift FROM schedules WHERE department_id = ? AND date >= ? AND date <= ? AND nurse_id IN (${placeholders})`,
+          [departmentId, startDate, endDate, ...nurseIds],
+          (err, schedules) => {
+            if (err) return reject(err);
+
+            db.all(
+              `SELECT nurse_id, date, hours FROM overtime_requests WHERE department_id = ? AND date >= ? AND date <= ? AND status = 'approved' AND nurse_id IN (${placeholders})`,
+              [departmentId, startDate, endDate, ...nurseIds],
+              (err, overtimes) => {
+                if (err) return reject(err);
+
+                db.all(
+                  `SELECT substitute_nurse_id, date FROM leave_requests WHERE department_id = ? AND date >= ? AND date <= ? AND status = 'approved' AND substitute_status = 'confirmed' AND substitute_nurse_id IN (${placeholders})`,
+                  [departmentId, startDate, endDate, ...nurseIds],
+                  (err, substitutes) => {
+                    if (err) return reject(err);
+
+                    db.all(
+                      `SELECT nurse_id, date FROM leave_requests WHERE department_id = ? AND date >= ? AND date <= ? AND status = 'approved' AND nurse_id IN (${placeholders})`,
+                      [departmentId, startDate, endDate, ...nurseIds],
+                      (err, leaves) => {
+                        if (err) return reject(err);
+
+                        const leaveSet = new Set(leaves.map(l => `${l.nurse_id}_${l.date}`));
+
+                        const result = nurses.map(nurse => {
+                          let totalHours = 0;
+
+                          schedules.filter(s => s.nurse_id === nurse.id).forEach(s => {
+                            if (!leaveSet.has(`${s.nurse_id}_${s.date}`)) {
+                              totalHours += SHIFT_HOURS[s.shift] || 8;
+                            }
+                          });
+
+                          substitutes.filter(s => s.substitute_nurse_id === nurse.id).forEach(() => {
+                            totalHours += 8;
+                          });
+
+                          overtimes.filter(o => o.nurse_id === nurse.id).forEach(o => {
+                            totalHours += o.hours;
+                          });
+
+                          totalHours = Math.round(totalHours * 100) / 100;
+
+                          return {
+                            nurse_id: nurse.id,
+                            nurse_name: nurse.name,
+                            nurse_level: nurse.level,
+                            total_hours: totalHours,
+                            is_fatigue_warning: totalHours > FATIGUE_THRESHOLD
+                          };
+                        });
+
+                        resolve(result);
+                      }
+                    );
+                  }
+                );
+              }
+            );
+          }
+        );
+      }
+    );
+  });
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -142,7 +315,13 @@ app.post('/api/departments/:id/generate-schedule', (req, res) => {
           if (err) {
             return res.status(500).json({ error: err.message });
           }
-          res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts });
+          const today = dayjs().format('YYYY-MM-DD');
+          compute7DayHours(db, id, today).then(fatigueData => {
+            const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+            res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings });
+          }).catch(() => {
+            res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings: [] });
+          });
         });
       });
     });
@@ -349,7 +528,13 @@ app.put('/api/swap-requests/:id/approve', (req, res) => {
                                 if (err) {
                                   return res.status(500).json({ error: err.message });
                                 }
-                                res.json({ success: true });
+                                const today = dayjs().format('YYYY-MM-DD');
+                                compute7DayHoursForNurses(db, [requester_id, target_id], department_id, today).then(fatigueData => {
+                                  const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                                  res.json({ success: true, fatigue_warnings });
+                                }).catch(() => {
+                                  res.json({ success: true, fatigue_warnings: [] });
+                                });
                               });
                             });
                           }
@@ -504,7 +689,13 @@ app.put('/api/overtime-requests/:id/approve', (req, res) => {
         if (err) {
           return res.status(500).json({ error: err.message });
         }
-        res.json({ success: true });
+        const today = dayjs().format('YYYY-MM-DD');
+        compute7DayHoursForNurses(db, [request.nurse_id], request.department_id, today).then(fatigueData => {
+          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+          res.json({ success: true, fatigue_warnings });
+        }).catch(() => {
+          res.json({ success: true, fatigue_warnings: [] });
+        });
       });
     });
   });
@@ -706,7 +897,13 @@ app.put('/api/leave-requests/:id/approve', (req, res) => {
           if (err) {
             return res.status(500).json({ error: err.message });
           }
-          res.json({ success: true, has_schedule: false });
+          const today = dayjs().format('YYYY-MM-DD');
+          compute7DayHoursForNurses(db, [request.nurse_id], request.department_id, today).then(fatigueData => {
+            const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+            res.json({ success: true, has_schedule: false, fatigue_warnings });
+          }).catch(() => {
+            res.json({ success: true, has_schedule: false, fatigue_warnings: [] });
+          });
         });
         return;
       }
@@ -784,7 +981,13 @@ app.put('/api/leave-requests/:id/approve', (req, res) => {
                           if (err) {
                             return res.status(500).json({ error: err.message });
                           }
-                          res.json({ success: true, has_schedule: true, substitute: updated });
+                          const today = dayjs().format('YYYY-MM-DD');
+                          compute7DayHoursForNurses(db, [substitute.id], department_id, today).then(fatigueData => {
+                            const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                            res.json({ success: true, has_schedule: true, substitute: updated, fatigue_warnings });
+                          }).catch(() => {
+                            res.json({ success: true, has_schedule: true, substitute: updated, fatigue_warnings: [] });
+                          });
                         });
                       });
                   } else {
@@ -801,7 +1004,7 @@ app.put('/api/leave-requests/:id/approve', (req, res) => {
                           if (err) {
                             return res.status(500).json({ error: err.message });
                           }
-                          res.json({ success: true, has_schedule: true, substitute: null, leave: updated, need_manual: true });
+                          res.json({ success: true, has_schedule: true, substitute: null, leave: updated, need_manual: true, fatigue_warnings: [] });
                         });
                       });
                   }
@@ -873,7 +1076,13 @@ app.put('/api/leave-requests/:id/confirm-substitute', (req, res) => {
         if (err) {
           return res.status(500).json({ error: err.message });
         }
-        res.json({ success: true });
+        const today = dayjs().format('YYYY-MM-DD');
+        compute7DayHoursForNurses(db, [finalSubId], request.department_id, today).then(fatigueData => {
+          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+          res.json({ success: true, fatigue_warnings });
+        }).catch(() => {
+          res.json({ success: true, fatigue_warnings: [] });
+        });
       });
   });
 });
@@ -902,7 +1111,13 @@ app.put('/api/leave-requests/:id/manual-substitute', (req, res) => {
         if (err) {
           return res.status(500).json({ error: err.message });
         }
-        res.json({ success: true });
+        const today = dayjs().format('YYYY-MM-DD');
+        compute7DayHoursForNurses(db, [substitute_nurse_id], request.department_id, today).then(fatigueData => {
+          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+          res.json({ success: true, fatigue_warnings });
+        }).catch(() => {
+          res.json({ success: true, fatigue_warnings: [] });
+        });
       });
   });
 });
@@ -1037,6 +1252,24 @@ app.get('/api/departments/:id/available-substitutes', (req, res) => {
         });
       });
     });
+  });
+});
+
+app.get('/api/departments/:id/fatigue-status', (req, res) => {
+  const { id } = req.params;
+  const { date } = req.query;
+  const referenceDate = date || dayjs().format('YYYY-MM-DD');
+
+  compute7DayHours(db, id, referenceDate).then(fatigueData => {
+    res.json({
+      department_id: parseInt(id),
+      reference_date: referenceDate,
+      threshold: FATIGUE_THRESHOLD,
+      nurses: fatigueData,
+      warning_count: fatigueData.filter(f => f.is_fatigue_warning).length
+    });
+  }).catch(err => {
+    res.status(500).json({ error: err.message });
   });
 });
 

@@ -59,6 +59,9 @@ export const getLeaveSummary = (deptId, month) =>
 export const getAvailableSubstitutes = (deptId, date, excludeNurseId) =>
   api.get(`/departments/${deptId}/available-substitutes`, { params: { date, exclude_nurse_id: excludeNurseId } });
 
+export const getFatigueStatus = (deptId, date) =>
+  api.get(`/departments/${deptId}/fatigue-status`, { params: { date } });
+
 export const getTrainingCourses = (deptId) => 
   api.get(`/departments/${deptId}/training-courses`);
 
