@@ -72,6 +72,43 @@ db.serialize(() => {
     FOREIGN KEY (department_id) REFERENCES departments(id),
     FOREIGN KEY (nurse_id) REFERENCES nurses(id)
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS training_courses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('theory', 'skill', 'comprehensive')),
+    hours REAL NOT NULL,
+    assessment_method TEXT NOT NULL CHECK(assessment_method IN ('written', 'practical', 'mixed')),
+    pass_score REAL NOT NULL DEFAULT 60,
+    is_mandatory INTEGER NOT NULL DEFAULT 0,
+    instructor TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS training_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    training_date TEXT NOT NULL,
+    score REAL,
+    passed INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES training_courses(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    UNIQUE(course_id, nurse_id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS training_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    year TEXT NOT NULL,
+    annual_target_hours REAL NOT NULL DEFAULT 40,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(department_id, year)
+  )`);
 });
 
 module.exports = db;

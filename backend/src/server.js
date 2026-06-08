@@ -2,12 +2,15 @@ const express = require('express');
 const cors = require('cors');
 const db = require('./db');
 const { generateSchedule, validateScheduleChange, getDaysInMonth } = require('./scheduler');
+const trainingRouter = require('./training');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
+app.use('/api', trainingRouter);
 
 app.get('/api/departments', (req, res) => {
   db.all('SELECT * FROM departments ORDER BY id', [], (err, rows) => {

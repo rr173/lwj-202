@@ -38,4 +38,29 @@ export const rejectOvertimeRequest = (id) => api.put(`/overtime-requests/${id}/r
 export const getMonthlyReport = (deptId, month) => 
   api.get(`/departments/${deptId}/monthly-report`, { params: { month } });
 
+export const getTrainingCourses = (deptId) => 
+  api.get(`/departments/${deptId}/training-courses`);
+
+export const createTrainingCourse = (data) => api.post('/training-courses', data);
+export const updateTrainingCourse = (id, data) => api.put(`/training-courses/${id}`, data);
+export const deleteTrainingCourse = (id) => api.delete(`/training-courses/${id}`);
+
+export const getTrainingRecords = (courseId) => 
+  api.get(`/training-courses/${courseId}/records`);
+
+export const createTrainingRecord = (data) => api.post('/training-records', data);
+export const updateTrainingRecord = (id, data) => api.put(`/training-records/${id}`, data);
+export const deleteTrainingRecord = (id) => api.delete(`/training-records/${id}`);
+
+export const getTrainingConfig = (deptId, year) => 
+  api.get(`/departments/${deptId}/training-config`, { params: { year } });
+
+export const updateTrainingConfig = (data) => api.post('/training-config', data);
+
+export const getNurseTrainingProgress = (deptId, nurseId, year) => 
+  api.get(`/departments/${deptId}/nurses/${nurseId}/training-progress`, { params: { year } });
+
+export const getDepartmentTrainingCompliance = (deptId, year) => 
+  api.get(`/departments/${deptId}/training-compliance`, { params: { year } });
+
 export default api;
