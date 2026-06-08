@@ -439,6 +439,13 @@ function SchedulePage() {
     );
   };
 
+  const getSubstituteShiftForDate = (nurseId, date) => {
+    const subInfo = getSubstituteInfoForDate(date).find(s => s.substitute_nurse_id === nurseId);
+    if (!subInfo) return null;
+    const originalShift = schedule.find(s => s.nurse_id === subInfo.nurse_id && s.date === date.format('YYYY-MM-DD'));
+    return originalShift || null;
+  };
+
   const days = getDaysInView();
   const pendingSwapCount = swapRequests.filter(r => r.status === 'pending' || r.status === 'confirmed').length;
   const pendingOvertimeCount = overtimeRequests.filter(r => r.status === 'pending').length;
@@ -956,6 +963,7 @@ function SchedulePage() {
                           const overtimes = getOvertimeForNurseAndDate(nurse.id, day);
                           const leave = getLeaveForNurseAndDate(nurse.id, day);
                           const subInfo = getSubstituteInfoForDate(day).find(s => s.substitute_nurse_id === nurse.id);
+                          const subOriginalShift = subInfo ? getSubstituteShiftForDate(nurse.id, day) : null;
 
                           const isLeave = leave && shift;
                           const isSubstitute = subInfo && !isLeave;
@@ -971,24 +979,38 @@ function SchedulePage() {
                                 background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : 'transparent')
                               }}
                             >
-                              {shift && (
+                              {shift && !isSubstitute && (
                                 <div 
                                   style={{ 
                                     padding: '4px 8px', 
                                     borderRadius: '4px', 
                                     color: '#fff', 
                                     fontSize: '12px',
-                                    background: isLeave ? '#ff4d4f' : (isSubstitute ? '#13c2c2' : SHIFT_COLORS[shift.shift]),
+                                    background: isLeave ? '#ff4d4f' : SHIFT_COLORS[shift.shift],
                                     marginBottom: '4px',
                                     cursor: 'pointer',
                                     textDecoration: isLeave ? 'line-through' : 'none'
                                   }}
                                   onClick={() => handleCellClick(nurse, dateStr, shift.shift, shift.id)}
                                 >
-                                  {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : (isSubstitute ? `补班(${SHIFT_NAMES[shift.shift]})` : SHIFT_NAMES[shift.shift])}
+                                  {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : SHIFT_NAMES[shift.shift]}
                                 </div>
                               )}
-                              {!shift && leave && (
+                              {isSubstitute && (
+                                <div 
+                                  style={{ 
+                                    padding: '4px 8px', 
+                                    borderRadius: '4px', 
+                                    color: '#fff', 
+                                    fontSize: '12px',
+                                    background: '#13c2c2',
+                                    marginBottom: '4px'
+                                  }}
+                                >
+                                  补班({subOriginalShift ? SHIFT_NAMES[subOriginalShift.shift] : '—'})
+                                </div>
+                              )}
+                              {!shift && leave && !isSubstitute && (
                                 <div 
                                   style={{ 
                                     padding: '4px 8px', 

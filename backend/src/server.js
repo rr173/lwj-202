@@ -563,7 +563,7 @@ app.get('/api/departments/:id/monthly-report', (req, res) => {
             }
 
             db.all(
-              "SELECT nurse_id, COUNT(*) as leave_count FROM leave_requests WHERE department_id = ? AND month = ? AND status = 'approved' GROUP BY nurse_id",
+              "SELECT lr.nurse_id, COUNT(*) as leave_count FROM leave_requests lr INNER JOIN schedules s ON s.nurse_id = lr.nurse_id AND s.date = lr.date WHERE lr.department_id = ? AND lr.month = ? AND lr.status = 'approved' GROUP BY lr.nurse_id",
               [id, month],
               (err, leaveStats) => {
                 if (err) {
@@ -586,10 +586,10 @@ app.get('/api/departments/:id/monthly-report', (req, res) => {
                       
                       const leave_count = leaveStat.leave_count || 0;
                       const substitute_shifts = subStat.substitute_count || 0;
-                      const effective_shift_count = scheduleStat.shift_count - leave_count + substitute_shifts;
-                      const normal_hours = effective_shift_count * 8;
+                      const normal_hours = (scheduleStat.shift_count - leave_count) * 8;
                       const substitute_hours = substitute_shifts * 8;
                       const overtime_hours = Math.round((overtimeStat.overtime_hours || 0) * 100) / 100;
+                      const total_hours = Math.round((normal_hours + substitute_hours + overtime_hours) * 100) / 100;
                       
                       return {
                         nurse_id: nurse.id,
@@ -598,12 +598,12 @@ app.get('/api/departments/:id/monthly-report', (req, res) => {
                         normal_shift_count: scheduleStat.shift_count,
                         leave_count,
                         substitute_shifts,
-                        effective_shift_count,
+                        effective_shift_count: scheduleStat.shift_count - leave_count + substitute_shifts,
                         overtime_count: overtimeStat.overtime_count,
                         normal_hours,
                         substitute_hours,
                         overtime_hours,
-                        total_hours: Math.round((normal_hours + overtime_hours) * 100) / 100
+                        total_hours
                       };
                     });
                     
@@ -747,56 +747,65 @@ app.put('/api/leave-requests/:id/approve', (req, res) => {
 
                 const substitutingSet = new Set(alreadySubstituting.map(s => s.substitute_nurse_id));
 
-                const availableNurses = nurses.filter(n =>
-                  !scheduledSet.has(n.id) &&
-                  !unavailableSet.has(n.id) &&
-                  !substitutingSet.has(n.id)
-                );
+                db.all(`SELECT nurse_id FROM leave_requests WHERE date = ? AND status = 'approved' AND nurse_id IN (${placeholders})`, [date, ...nurseIds], (err, leaveNurses) => {
+                  if (err) {
+                    return res.status(500).json({ error: err.message });
+                  }
 
-                const countMap = {};
-                shiftCounts.forEach(sc => {
-                  countMap[sc.nurse_id] = sc.shift_count;
+                  const leaveSet = new Set(leaveNurses.map(l => l.nurse_id));
+
+                  const availableNurses = nurses.filter(n =>
+                    !scheduledSet.has(n.id) &&
+                    !unavailableSet.has(n.id) &&
+                    !substitutingSet.has(n.id) &&
+                    !leaveSet.has(n.id)
+                  );
+
+                  const countMap = {};
+                  shiftCounts.forEach(sc => {
+                    countMap[sc.nurse_id] = sc.shift_count;
+                  });
+
+                  availableNurses.sort((a, b) => (countMap[a.id] || 0) - (countMap[b.id] || 0));
+
+                  const substitute = availableNurses.length > 0 ? availableNurses[0] : null;
+
+                  if (substitute) {
+                    db.run('UPDATE leave_requests SET status = ?, substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+                      ['approved', substitute.id, 'pending', id], function(err) {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+                        db.get(`SELECT lr.*, n.name as nurse_name, sn.name as substitute_name
+                          FROM leave_requests lr
+                          JOIN nurses n ON lr.nurse_id = n.id
+                          LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
+                          WHERE lr.id = ?`, [id], (err, updated) => {
+                          if (err) {
+                            return res.status(500).json({ error: err.message });
+                          }
+                          res.json({ success: true, has_schedule: true, substitute: updated });
+                        });
+                      });
+                  } else {
+                    db.run('UPDATE leave_requests SET status = ?, substitute_status = ? WHERE id = ?',
+                      ['approved', 'none', id], function(err) {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+                        db.get(`SELECT lr.*, n.name as nurse_name, sn.name as substitute_name
+                          FROM leave_requests lr
+                          JOIN nurses n ON lr.nurse_id = n.id
+                          LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
+                          WHERE lr.id = ?`, [id], (err, updated) => {
+                          if (err) {
+                            return res.status(500).json({ error: err.message });
+                          }
+                          res.json({ success: true, has_schedule: true, substitute: null, leave: updated, need_manual: true });
+                        });
+                      });
+                  }
                 });
-
-                availableNurses.sort((a, b) => (countMap[a.id] || 0) - (countMap[b.id] || 0));
-
-                const substitute = availableNurses.length > 0 ? availableNurses[0] : null;
-
-                if (substitute) {
-                  db.run('UPDATE leave_requests SET status = ?, substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
-                    ['approved', substitute.id, 'pending', id], function(err) {
-                      if (err) {
-                        return res.status(500).json({ error: err.message });
-                      }
-                      db.get(`SELECT lr.*, n.name as nurse_name, sn.name as substitute_name
-                        FROM leave_requests lr
-                        JOIN nurses n ON lr.nurse_id = n.id
-                        LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
-                        WHERE lr.id = ?`, [id], (err, updated) => {
-                        if (err) {
-                          return res.status(500).json({ error: err.message });
-                        }
-                        res.json({ success: true, has_schedule: true, substitute: updated });
-                      });
-                    });
-                } else {
-                  db.run('UPDATE leave_requests SET status = ?, substitute_status = ? WHERE id = ?',
-                    ['approved', 'none', id], function(err) {
-                      if (err) {
-                        return res.status(500).json({ error: err.message });
-                      }
-                      db.get(`SELECT lr.*, n.name as nurse_name, sn.name as substitute_name
-                        FROM leave_requests lr
-                        JOIN nurses n ON lr.nurse_id = n.id
-                        LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
-                        WHERE lr.id = ?`, [id], (err, updated) => {
-                        if (err) {
-                          return res.status(500).json({ error: err.message });
-                        }
-                        res.json({ success: true, has_schedule: true, substitute: null, leave: updated, need_manual: true });
-                      });
-                    });
-                }
               });
             });
           });
@@ -859,55 +868,13 @@ app.put('/api/leave-requests/:id/confirm-substitute', (req, res) => {
       return;
     }
 
-    db.get('SELECT * FROM schedules WHERE nurse_id = ? AND date = ?', [request.nurse_id, request.date], (err, schedule) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-
-        const doConfirm = (scheduleId) => {
-          if (scheduleId) {
-            db.run('UPDATE schedules SET nurse_id = ? WHERE id = ?', [finalSubId, scheduleId], function(err) {
-              if (err) {
-                db.run('ROLLBACK');
-                return res.status(500).json({ error: err.message });
-              }
-              db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
-                [finalSubId, 'confirmed', id], function(err) {
-                  if (err) {
-                    db.run('ROLLBACK');
-                    return res.status(500).json({ error: err.message });
-                  }
-                  db.run('COMMIT', (err) => {
-                    if (err) {
-                      return res.status(500).json({ error: err.message });
-                    }
-                    res.json({ success: true });
-                  });
-                });
-            });
-          } else {
-            db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
-              [finalSubId, 'confirmed', id], function(err) {
-                if (err) {
-                  db.run('ROLLBACK');
-                  return res.status(500).json({ error: err.message });
-                }
-                db.run('COMMIT', (err) => {
-                  if (err) {
-                    return res.status(500).json({ error: err.message });
-                  }
-                  res.json({ success: true });
-                });
-              });
-          }
-        };
-
-        doConfirm(schedule ? schedule.id : null);
+    db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+      [finalSubId, 'confirmed', id], function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        res.json({ success: true });
       });
-    });
   });
 });
 
@@ -930,51 +897,13 @@ app.put('/api/leave-requests/:id/manual-substitute', (req, res) => {
       return res.status(400).json({ error: '请假申请未审批通过' });
     }
 
-    db.get('SELECT * FROM schedules WHERE nurse_id = ? AND date = ?', [request.nurse_id, request.date], (err, schedule) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-
-        if (schedule) {
-          db.run('UPDATE schedules SET nurse_id = ? WHERE id = ?', [substitute_nurse_id, schedule.id], function(err) {
-            if (err) {
-              db.run('ROLLBACK');
-              return res.status(500).json({ error: err.message });
-            }
-            db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
-              [substitute_nurse_id, 'confirmed', id], function(err) {
-                if (err) {
-                  db.run('ROLLBACK');
-                  return res.status(500).json({ error: err.message });
-                }
-                db.run('COMMIT', (err) => {
-                  if (err) {
-                    return res.status(500).json({ error: err.message });
-                  }
-                  res.json({ success: true });
-                });
-              });
-          });
-        } else {
-          db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
-            [substitute_nurse_id, 'confirmed', id], function(err) {
-              if (err) {
-                db.run('ROLLBACK');
-                return res.status(500).json({ error: err.message });
-              }
-              db.run('COMMIT', (err) => {
-                if (err) {
-                  return res.status(500).json({ error: err.message });
-                }
-                res.json({ success: true });
-              });
-            });
+    db.run('UPDATE leave_requests SET substitute_nurse_id = ?, substitute_status = ? WHERE id = ?',
+      [substitute_nurse_id, 'confirmed', id], function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
         }
+        res.json({ success: true });
       });
-    });
   });
 });
 
@@ -1081,22 +1010,30 @@ app.get('/api/departments/:id/available-substitutes', (req, res) => {
 
           const unavailableSet = new Set(unavailableNurses.map(u => u.nurse_id));
 
-          const countMap = {};
-          shiftCounts.forEach(sc => {
-            countMap[sc.nurse_id] = sc.shift_count;
+          db.all(`SELECT nurse_id FROM leave_requests WHERE date = ? AND status = 'approved' AND nurse_id IN (${placeholders})`, [date, ...nurseIds], (err, leaveNurses) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+
+            const leaveSet = new Set(leaveNurses.map(l => l.nurse_id));
+
+            const countMap = {};
+            shiftCounts.forEach(sc => {
+              countMap[sc.nurse_id] = sc.shift_count;
+            });
+
+            const available = nurses
+              .filter(n => !scheduledSet.has(n.id) && !unavailableSet.has(n.id) && !leaveSet.has(n.id))
+              .map(n => ({
+                id: n.id,
+                name: n.name,
+                level: n.level,
+                shift_count: countMap[n.id] || 0
+              }))
+              .sort((a, b) => a.shift_count - b.shift_count);
+
+            res.json(available);
           });
-
-          const available = nurses
-            .filter(n => !scheduledSet.has(n.id) && !unavailableSet.has(n.id))
-            .map(n => ({
-              id: n.id,
-              name: n.name,
-              level: n.level,
-              shift_count: countMap[n.id] || 0
-            }))
-            .sort((a, b) => a.shift_count - b.shift_count);
-
-          res.json(available);
         });
       });
     });
