@@ -96,8 +96,7 @@ db.serialize(() => {
     passed INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES training_courses(id),
-    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
-    UNIQUE(course_id, nurse_id)
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id)
   )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS training_config (

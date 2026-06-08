@@ -269,9 +269,15 @@ function TrainingPage() {
       dataIndex: 'nurse_name',
       key: 'nurse_name',
       width: 120,
-      render: (text, record) => (
-        <span>{text} <span style={{ fontSize: 12, color: record.nurse_level === 'senior' ? '#fa8c16' : '#999' }}>({record.nurse_level === 'senior' ? '资深' : '普通'})</span></span>
-      )
+      render: (text, record, index) => {
+        let attempt = 1;
+        for (let i = 0; i < index; i++) {
+          if (records[i]?.nurse_id === record.nurse_id) attempt++;
+        }
+        return (
+          <span>{text} <span style={{ fontSize: 12, color: record.nurse_level === 'senior' ? '#fa8c16' : '#999' }}>({record.nurse_level === 'senior' ? '资深' : '普通'})</span> <Tag style={{ marginLeft: 4, fontSize: 11 }}>第{attempt}次</Tag></span>
+        );
+      }
     },
     {
       title: '参加日期',

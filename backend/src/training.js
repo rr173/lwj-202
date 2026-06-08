@@ -77,7 +77,7 @@ router.post('/training-records', (req, res) => {
     if (!course) return res.status(404).json({ error: '课程不存在' });
     const passed = score != null && score >= course.pass_score ? 1 : 0;
     db.run(
-      'INSERT OR REPLACE INTO training_records (course_id, nurse_id, training_date, score, passed) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO training_records (course_id, nurse_id, training_date, score, passed) VALUES (?, ?, ?, ?, ?)',
       [course_id, nurse_id, training_date, score, passed],
       function (err) {
         if (err) return res.status(500).json({ error: err.message });
@@ -162,16 +162,30 @@ router.get('/departments/:id/nurses/:nurseId/training-progress', (req, res) => {
         `SELECT tr.*, tc.name as course_name, tc.hours as course_hours, tc.is_mandatory, tc.pass_score
          FROM training_records tr
          JOIN training_courses tc ON tr.course_id = tc.id
-         WHERE tr.nurse_id = ? AND tr.training_date LIKE ?`,
+         WHERE tr.nurse_id = ? AND tr.training_date LIKE ?
+         ORDER BY tr.course_id, tr.id`,
         [nurseId, yearPrefix],
         (err2, records) => {
           if (err2) return res.status(500).json({ error: err2.message });
 
-          const completedHours = records
-            .filter(r => r.passed)
-            .reduce((sum, r) => sum + r.course_hours, 0);
+          const courseMap = new Map();
+          records.forEach(r => {
+            const existing = courseMap.get(r.course_id);
+            if (!existing) {
+              courseMap.set(r.course_id, { passed: r.passed, course_hours: r.course_hours, is_mandatory: r.is_mandatory });
+            } else {
+              if (r.passed && !existing.passed) {
+                existing.passed = 1;
+              }
+            }
+          });
 
-          const mandatoryFailed = records.some(r => r.is_mandatory && !r.passed);
+          let completedHours = 0;
+          let mandatoryFailed = false;
+          courseMap.forEach((val) => {
+            if (val.passed) completedHours += val.course_hours;
+            if (val.is_mandatory && !val.passed) mandatoryFailed = true;
+          });
 
           db.all(
             'SELECT * FROM training_courses WHERE department_id = ? AND is_mandatory = 1',
@@ -180,7 +194,7 @@ router.get('/departments/:id/nurses/:nurseId/training-progress', (req, res) => {
               if (err3) return res.status(500).json({ error: err3.message });
 
               const mandatoryNotAttempted = mandatoryCourses.filter(
-                mc => !records.some(r => r.course_id === mc.id)
+                mc => !courseMap.has(mc.id)
               ).length;
 
               const isCompliant = !mandatoryFailed && mandatoryNotAttempted === 0 && completedHours >= targetHours;
@@ -237,21 +251,38 @@ router.get('/departments/:id/training-compliance', (req, res) => {
               `SELECT tr.*, tc.hours as course_hours, tc.is_mandatory, tc.pass_score
                FROM training_records tr
                JOIN training_courses tc ON tr.course_id = tc.id
-               WHERE tr.nurse_id IN (${placeholders}) AND tr.training_date LIKE ?`,
+               WHERE tr.nurse_id IN (${placeholders}) AND tr.training_date LIKE ?
+               ORDER BY tr.nurse_id, tr.course_id, tr.id`,
               [...nurseIds, yearPrefix],
               (err4, allRecords) => {
                 if (err4) return res.status(500).json({ error: err4.message });
 
                 const nurseResults = nurses.map(nurse => {
                   const nurseRecords = allRecords.filter(r => r.nurse_id === nurse.id);
-                  const completedHours = nurseRecords
-                    .filter(r => r.passed)
-                    .reduce((sum, r) => sum + r.course_hours, 0);
 
-                  const mandatoryFailed = nurseRecords.some(r => r.is_mandatory && !r.passed);
+                  const courseMap = new Map();
+                  nurseRecords.forEach(r => {
+                    const existing = courseMap.get(r.course_id);
+                    if (!existing) {
+                      courseMap.set(r.course_id, { passed: r.passed, course_hours: r.course_hours, is_mandatory: r.is_mandatory });
+                    } else {
+                      if (r.passed && !existing.passed) {
+                        existing.passed = 1;
+                      }
+                    }
+                  });
+
+                  let completedHours = 0;
+                  let mandatoryFailed = false;
+                  courseMap.forEach((val) => {
+                    if (val.passed) completedHours += val.course_hours;
+                    if (val.is_mandatory && !val.passed) mandatoryFailed = true;
+                  });
+
                   const mandatoryNotAttempted = mandatoryCourses.filter(
-                    mc => !nurseRecords.some(r => r.course_id === mc.id)
+                    mc => !courseMap.has(mc.id)
                   ).length;
+
                   const isCompliant = !mandatoryFailed && mandatoryNotAttempted === 0 && completedHours >= targetHours;
 
                   return {
