@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Layout, Menu } from 'antd';
 import SchedulePage from './SchedulePage';
 import TrainingPage from './TrainingPage';
+import EventPage from './EventPage';
 
 const { Header } = Layout;
 
@@ -20,12 +21,13 @@ function App() {
             style={{ border: 'none', lineHeight: '46px' }}
             items={[
               { key: 'schedule', label: '排班管理' },
-              { key: 'training', label: '培训管理' }
+              { key: 'training', label: '培训管理' },
+              { key: 'event', label: '事件管理' }
             ]}
           />
         </div>
       </Header>
-      {currentModule === 'schedule' ? <SchedulePage /> : <TrainingPage />}
+      {currentModule === 'schedule' ? <SchedulePage /> : currentModule === 'training' ? <TrainingPage /> : <EventPage />}
     </Layout>
   );
 }

@@ -4,6 +4,7 @@ const dayjs = require('dayjs');
 const db = require('./db');
 const { generateSchedule, validateScheduleChange, getDaysInMonth } = require('./scheduler');
 const trainingRouter = require('./training');
+const adverseEventRouter = require('./adverseEvent');
 
 const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
 const FATIGUE_THRESHOLD = 48;
@@ -184,6 +185,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use('/api', trainingRouter);
+app.use('/api', adverseEventRouter);
 
 app.get('/api/departments', (req, res) => {
   db.all('SELECT * FROM departments ORDER BY id', [], (err, rows) => {

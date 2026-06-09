@@ -10,6 +10,8 @@ function initDemoData() {
   db.serialize(() => {
     db.run('BEGIN TRANSACTION');
 
+    db.run('DELETE FROM adverse_event_timeline');
+    db.run('DELETE FROM adverse_events');
     db.run('DELETE FROM swap_requests');
     db.run('DELETE FROM overtime_requests');
     db.run('DELETE FROM leave_requests');
@@ -146,18 +148,111 @@ function initDemoData() {
                               }
                               recordCompleted++;
                               if (recordCompleted === recordData.length) {
-                                db.run('COMMIT', (err) => {
-                                  if (err) {
-                                    console.error('提交事务失败:', err);
-                                    return;
-                                  }
-                                  console.log('演示数据初始化成功!');
-                                  console.log(`科室: 内科 (ID: ${deptId})`);
-                                  console.log(`护士人数: ${nurses.length} (2名senior, 4名junior)`);
-                                  console.log(`月份: ${currentMonth}`);
-                                  console.log(`排班记录数: ${result.schedule.length}`);
-                                  console.log(`培训课程数: ${courses.length}`);
-                                  console.log(`培训记录数: ${recordData.length}`);
+                                const today = dayjs().format('YYYY-MM-DD');
+                                const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+                                const twoDaysAgo = dayjs().subtract(2, 'day').format('YYYY-MM-DD');
+                                const threeDaysAgo = dayjs().subtract(3, 'day').format('YYYY-MM-DD');
+                                const fiveDaysAgo = dayjs().subtract(5, 'day').format('YYYY-MM-DD');
+                                const tenDaysAgo = dayjs().subtract(10, 'day').format('YYYY-MM-DD');
+                                const fifteenDaysAgo = dayjs().subtract(15, 'day').format('YYYY-MM-DD');
+
+                                const demoEvents = [
+                                  { reporterIdx: 2, event_type: 'medication_error', event_time: `${today} 09:30`, patient_bed: '12床', severity: 2, description: '早班给3床患者发药时将阿莫西林误发给12床患者，患者已服用，未出现不良反应', status: 'pending', responsible_nurse_id: null, rectification_days: null, rectification_deadline: null, rectification_report: null, is_overdue: 0 },
+                                  { reporterIdx: 3, event_type: 'fall', event_time: `${yesterday} 22:15`, patient_bed: '8床', severity: 3, description: '夜班巡房时发现8床老年患者自行下床如厕时跌倒，右侧髋部疼痛，已通知医生处理', status: 'processing', responsible_nurse_id: null, rectification_days: 7, rectification_deadline: dayjs().add(6, 'day').format('YYYY-MM-DD'), rectification_report: null, is_overdue: 0 },
+                                  { reporterIdx: 4, event_type: 'pressure_ulcer', event_time: `${twoDaysAgo} 14:00`, patient_bed: '5床', severity: 2, description: '交接班时发现5床长期卧床患者骶尾部出现II期压疮，面积约3cm×4cm', status: 'reviewing', responsible_nurse_id: null, rectification_days: 5, rectification_deadline: dayjs().add(3, 'day').format('YYYY-MM-DD'), rectification_report: '已制定翻身计划，每2小时翻身一次，使用防压疮气垫床，加强营养支持，已培训当班护士压疮护理规范', is_overdue: 0 },
+                                  { reporterIdx: 2, event_type: 'infection', event_time: `${fiveDaysAgo} 10:00`, patient_bed: '3床', severity: 1, description: '3床术后伤口出现红肿渗液，送检培养结果为金葡菌感染', status: 'closed', responsible_nurse_id: null, rectification_days: 3, rectification_deadline: dayjs().subtract(2, 'day').format('YYYY-MM-DD'), rectification_report: '已加强手卫生管理，规范换药操作流程，每日观察伤口情况并记录，感染已控制', is_overdue: 0 },
+                                  { reporterIdx: 5, event_type: 'medication_error', event_time: `${tenDaysAgo} 16:30`, patient_bed: '7床', severity: 1, description: '中班给7床患者发药时剂量多给一片，及时发现并纠正，未造成影响', status: 'closed', responsible_nurse_id: null, rectification_days: 5, rectification_deadline: dayjs().subtract(5, 'day').format('YYYY-MM-DD'), rectification_report: '已重新培训给药核对流程，增加双人核对环节，更新给药操作SOP', is_overdue: 0 },
+                                  { reporterIdx: 3, event_type: 'fall', event_time: `${fifteenDaysAgo} 06:45`, patient_bed: '15床', severity: 4, description: '早班交接时发现15床患者自行翻越床栏坠床，头部着地，已紧急处理并转ICU观察', status: 'processing', responsible_nurse_id: null, rectification_days: 3, rectification_deadline: dayjs().subtract(12, 'day').format('YYYY-MM-DD'), rectification_report: null, is_overdue: 1 },
+                                  { reporterIdx: 4, event_type: 'other', event_time: `${fiveDaysAgo} 11:00`, patient_bed: '20床', severity: 1, description: '20床患者家属投诉护士态度冷漠，沟通不畅', status: 'reviewing', responsible_nurse_id: null, rectification_days: 3, rectification_deadline: dayjs().subtract(2, 'day').format('YYYY-MM-DD'), rectification_report: '已组织科室沟通培训，当班护士已向家属致歉并改进服务态度，建立患者满意度反馈机制', is_overdue: 1 },
+                                  { reporterIdx: 2, event_type: 'pressure_ulcer', event_time: `${threeDaysAgo} 08:00`, patient_bed: '11床', severity: 3, description: '11床偏瘫患者足跟出现III期压疮，面积约2cm×3cm，有坏死组织', status: 'pending', responsible_nurse_id: null, rectification_days: null, rectification_deadline: null, rectification_report: null, is_overdue: 0 }
+                                ];
+                                let eventCompleted = 0;
+                                const eventIds = [];
+
+                                demoEvents.forEach((de, idx) => {
+                                  const reporterId = nurseIds[de.reporterIdx].id;
+                                  const respNurseId = de.responsible_nurse_id !== null ? nurseIds[de.responsible_nurse_id].id : null;
+                                  const actualRespId = de.status !== 'pending' ? nurseIds[1].id : null;
+                                  const eventDate = de.event_time.substring(0, 10);
+
+                                  db.get('SELECT id FROM schedules WHERE nurse_id = ? AND date = ?', [reporterId, eventDate], (sErr, scheduleRow) => {
+                                    if (sErr) {
+                                      console.error('查找排班失败:', sErr);
+                                      return;
+                                    }
+
+                                    db.run(
+                                      'INSERT INTO adverse_events (department_id, reporter_id, event_type, event_time, patient_bed, severity, description, status, schedule_id, responsible_nurse_id, rectification_days, rectification_deadline, rectification_report, is_overdue) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                      [deptId, reporterId, de.event_type, de.event_time, de.patient_bed, de.severity, de.description, de.status, scheduleRow ? scheduleRow.id : null, actualRespId, de.rectification_days, de.rectification_deadline, de.rectification_report, de.is_overdue],
+                                      function (eErr) {
+                                        if (eErr) {
+                                          console.error('创建不良事件失败:', eErr);
+                                          return;
+                                        }
+                                        const eventId = this.lastID;
+                                        eventIds.push(eventId);
+                                        eventCompleted++;
+
+                                        if (eventCompleted === demoEvents.length) {
+                                          const timelineData = [];
+
+                                          demoEvents.forEach((de2, idx2) => {
+                                            const eid = eventIds[idx2];
+                                            const rName = nurseIds[de2.reporterIdx].name;
+
+                                            timelineData.push({ event_id: eid, action: '创建事件', from_status: null, to_status: 'pending', operator_id: nurseIds[de2.reporterIdx].id, operator_name: rName, remark: '事件上报' });
+
+                                            if (de2.status !== 'pending') {
+                                              timelineData.push({ event_id: eid, action: '审核通过，进入处理中', from_status: 'pending', to_status: 'processing', operator_id: nurseIds[0].id, operator_name: nurseIds[0].name, remark: `责任人: ${nurseIds[1].name}, 整改期限: ${de2.rectification_deadline}(${de2.rectification_days}天)` });
+                                            }
+
+                                            if (de2.status === 'reviewing' || de2.status === 'closed') {
+                                              timelineData.push({ event_id: eid, action: '提交整改报告，待验收', from_status: 'processing', to_status: 'reviewing', operator_id: nurseIds[1].id, operator_name: nurseIds[1].name, remark: null });
+                                            }
+
+                                            if (de2.status === 'closed') {
+                                              timelineData.push({ event_id: eid, action: '验收通过，事件关闭', from_status: 'reviewing', to_status: 'closed', operator_id: nurseIds[0].id, operator_name: nurseIds[0].name, remark: null });
+                                            }
+
+                                            if (de2.is_overdue === 1 && de2.status !== 'closed') {
+                                              timelineData.push({ event_id: eid, action: '系统标记为逾期', from_status: de2.status, to_status: de2.status, operator_id: null, operator_name: '系统', remark: '超过整改期限未关闭' });
+                                            }
+                                          });
+
+                                          let tlCompleted = 0;
+                                          timelineData.forEach(td => {
+                                            db.run(
+                                              'INSERT INTO adverse_event_timeline (event_id, action, from_status, to_status, operator_id, operator_name, remark) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                                              [td.event_id, td.action, td.from_status, td.to_status, td.operator_id, td.operator_name, td.remark],
+                                              function (tErr) {
+                                                if (tErr) {
+                                                  console.error('创建时间线失败:', tErr);
+                                                  return;
+                                                }
+                                                tlCompleted++;
+                                                if (tlCompleted === timelineData.length) {
+                                                  db.run('COMMIT', (err) => {
+                                                    if (err) {
+                                                      console.error('提交事务失败:', err);
+                                                      return;
+                                                    }
+                                                    console.log('演示数据初始化成功!');
+                                                    console.log(`科室: 内科 (ID: ${deptId})`);
+                                                    console.log(`护士人数: ${nurses.length} (2名senior, 4名junior)`);
+                                                    console.log(`月份: ${currentMonth}`);
+                                                    console.log(`排班记录数: ${result.schedule.length}`);
+                                                    console.log(`培训课程数: ${courses.length}`);
+                                                    console.log(`培训记录数: ${recordData.length}`);
+                                                    console.log(`不良事件数: ${demoEvents.length}`);
+                                                  });
+                                                }
+                                              }
+                                            );
+                                          });
+                                        }
+                                      }
+                                    );
+                                  });
                                 });
                               }
                             }

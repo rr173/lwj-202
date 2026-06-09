@@ -84,7 +84,34 @@ export const updateTrainingConfig = (data) => api.post('/training-config', data)
 export const getNurseTrainingProgress = (deptId, nurseId, year) => 
   api.get(`/departments/${deptId}/nurses/${nurseId}/training-progress`, { params: { year } });
 
-export const getDepartmentTrainingCompliance = (deptId, year) => 
+export const getDepartmentTrainingCompliance = (deptId, year) =>
   api.get(`/departments/${deptId}/training-compliance`, { params: { year } });
+
+export const getAdverseEvents = (params) =>
+  api.get('/adverse-events', { params });
+
+export const getAdverseEvent = (id) =>
+  api.get(`/adverse-events/${id}`);
+
+export const createAdverseEvent = (data) =>
+  api.post('/adverse-events', data);
+
+export const approveAdverseEvent = (id, data) =>
+  api.put(`/adverse-events/${id}/approve`, data);
+
+export const submitRectification = (id, data) =>
+  api.put(`/adverse-events/${id}/submit-rectification`, data);
+
+export const acceptAdverseEvent = (id, data) =>
+  api.put(`/adverse-events/${id}/accept`, data);
+
+export const rejectAdverseEvent = (id, data) =>
+  api.put(`/adverse-events/${id}/reject`, data);
+
+export const getAdverseEventStatistics = (params) =>
+  api.get('/adverse-event-statistics/overview', { params });
+
+export const getAdverseEventNurseStatistics = (deptId) =>
+  api.get('/adverse-event-statistics/by-nurse', { params: { department_id: deptId } });
 
 export default api;

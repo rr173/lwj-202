@@ -116,6 +116,42 @@ db.serialize(() => {
     FOREIGN KEY (nurse_id) REFERENCES nurses(id)
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS adverse_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    reporter_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN ('medication_error', 'fall', 'pressure_ulcer', 'infection', 'other')),
+    event_time TEXT NOT NULL,
+    patient_bed TEXT,
+    severity INTEGER NOT NULL CHECK(severity IN (1, 2, 3, 4)),
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'reviewing', 'closed')),
+    schedule_id INTEGER,
+    responsible_nurse_id INTEGER,
+    rectification_days INTEGER,
+    rectification_deadline TEXT,
+    rectification_report TEXT,
+    is_overdue INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (reporter_id) REFERENCES nurses(id),
+    FOREIGN KEY (responsible_nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (schedule_id) REFERENCES schedules(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS adverse_event_timeline (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    from_status TEXT,
+    to_status TEXT,
+    operator_id INTEGER,
+    operator_name TEXT,
+    remark TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (event_id) REFERENCES adverse_events(id)
+  )`);
+
   db.run(`CREATE TABLE IF NOT EXISTS training_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     department_id INTEGER NOT NULL,
