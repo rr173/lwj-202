@@ -2,6 +2,12 @@ const dayjs = require('dayjs');
 
 const SHIFTS = ['morning', 'afternoon', 'night'];
 
+const SHIFT_NAMES_CN = {
+  morning: '早班',
+  afternoon: '中班',
+  night: '夜班'
+};
+
 function getDaysInMonth(year, month) {
   const days = [];
   const date = dayjs(`${year}-${String(month).padStart(2, '0')}-01`);
@@ -39,7 +45,48 @@ function canAssign(nurse, date, shift, unavailableDates, existingShifts) {
   return true;
 }
 
-function generateSchedule(departmentId, nurses, month, unavailableDatesList = []) {
+function buildNurseSkillMap(nurseSkillsList) {
+  const map = {};
+  nurseSkillsList.forEach(ns => {
+    if (!map[ns.nurse_id]) map[ns.nurse_id] = new Set();
+    map[ns.nurse_id].add(ns.skill_id);
+  });
+  return map;
+}
+
+function buildShiftRequirementsMap(shiftRequirementsList) {
+  const map = {};
+  shiftRequirementsList.forEach(r => {
+    if (!map[r.shift]) map[r.shift] = [];
+    map[r.shift].push({ skill_id: r.skill_id, skill_name: r.skill_name });
+  });
+  return map;
+}
+
+function checkDaySkillCoverage(dayShifts, nurseSkillMap, shiftReqs) {
+  const missing = [];
+  Object.keys(shiftReqs).forEach(shift => {
+    const nursesInShift = dayShifts.filter(s => s.shift === shift);
+    const coveredSkillIds = new Set();
+    nursesInShift.forEach(s => {
+      if (nurseSkillMap[s.nurse_id]) {
+        nurseSkillMap[s.nurse_id].forEach(sid => coveredSkillIds.add(sid));
+      }
+    });
+    shiftReqs[shift].forEach(req => {
+      if (!coveredSkillIds.has(req.skill_id)) {
+        missing.push({
+          shift,
+          skill_id: req.skill_id,
+          skill_name: req.skill_name
+        });
+      }
+    });
+  });
+  return missing;
+}
+
+function generateSchedule(departmentId, nurses, month, unavailableDatesList = [], nurseSkillsList = [], shiftRequirementsList = []) {
   const [year, monthNum] = month.split('-').map(Number);
   const days = getDaysInMonth(year, monthNum);
   
@@ -58,6 +105,9 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
     return { success: false, reason: '科室至少需要1名senior护士' };
   }
 
+  const nurseSkillMap = buildNurseSkillMap(nurseSkillsList);
+  const shiftReqs = buildShiftRequirementsMap(shiftRequirementsList);
+
   const existingShifts = {};
   const shiftCounts = {};
   nurses.forEach(n => {
@@ -67,23 +117,64 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
 
   const schedule = [];
 
+  const skillShifts = SHIFTS.filter(s => shiftReqs[s] && shiftReqs[s].length > 0);
+  const normalShifts = SHIFTS.filter(s => !shiftReqs[s] || shiftReqs[s].length === 0);
+
   for (const date of days) {
     const dayShifts = [];
     const usedNurses = new Set();
     let hasSenior = false;
 
-    for (const shift of SHIFTS) {
-      let assigned = false;
-      const candidates = [...seniorNurses, ...juniorNurses].sort((a, b) => {
-        const countA = shiftCounts[a.id] || 0;
-        const countB = shiftCounts[b.id] || 0;
-        return countA - countB;
-      });
+    const assignOrder = [...skillShifts, ...normalShifts];
 
-      for (const nurse of candidates) {
-        if (usedNurses.has(nurse.id)) continue;
-        
-        if (canAssign(nurse, date, shift, unavailableDates, existingShifts)) {
+    for (const shift of assignOrder) {
+      const requiredSkills = shiftReqs[shift] || [];
+      let assigned = false;
+
+      const candidates = [...seniorNurses, ...juniorNurses].filter(n =>
+        !usedNurses.has(n.id) && canAssign(n, date, shift, unavailableDates, existingShifts)
+      );
+
+      if (requiredSkills.length > 0) {
+        const scored = candidates.map(n => {
+          const nurseSkills = nurseSkillMap[n.id] || new Set();
+          let coveredCount = 0;
+          requiredSkills.forEach(req => {
+            if (nurseSkills.has(req.skill_id)) coveredCount++;
+          });
+          return { nurse: n, coveredCount, shiftCount: shiftCounts[n.id] || 0 };
+        });
+
+        scored.sort((a, b) => {
+          if (b.coveredCount !== a.coveredCount) return b.coveredCount - a.coveredCount;
+          return a.shiftCount - b.shiftCount;
+        });
+
+        const chosen = scored[0];
+        if (chosen) {
+          dayShifts.push({
+            department_id: departmentId,
+            nurse_id: chosen.nurse.id,
+            date: date,
+            shift: shift,
+            month: month
+          });
+          existingShifts[chosen.nurse.id][date] = shift;
+          shiftCounts[chosen.nurse.id]++;
+          usedNurses.add(chosen.nurse.id);
+          if (chosen.nurse.level === 'senior') {
+            hasSenior = true;
+          }
+          assigned = true;
+        }
+      } else {
+        const sorted = candidates.sort((a, b) => {
+          const countA = shiftCounts[a.id] || 0;
+          const countB = shiftCounts[b.id] || 0;
+          return countA - countB;
+        });
+
+        for (const nurse of sorted) {
           dayShifts.push({
             department_id: departmentId,
             nurse_id: nurse.id,
@@ -103,7 +194,7 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
       }
 
       if (!assigned) {
-        return { success: false, reason: `无法为 ${date} 的${shift === 'morning' ? '早班' : shift === 'afternoon' ? '中班' : '夜班'}找到合适护士` };
+        return { success: false, reason: `无法为 ${date} 的${SHIFT_NAMES_CN[shift]}找到合适护士` };
       }
     }
 
@@ -138,18 +229,38 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
     schedule.push(...dayShifts);
   }
 
+  const skillWarnings = [];
+  if (Object.keys(shiftReqs).length > 0) {
+    const dates = [...new Set(schedule.map(s => s.date))].sort();
+    for (const date of dates) {
+      const dayShifts = schedule.filter(s => s.date === date);
+      const missing = checkDaySkillCoverage(dayShifts, nurseSkillMap, shiftReqs);
+      if (missing.length > 0) {
+        missing.forEach(m => {
+          skillWarnings.push({
+            date,
+            shift: m.shift,
+            shift_name: SHIFT_NAMES_CN[m.shift],
+            skill_id: m.skill_id,
+            skill_name: m.skill_name
+          });
+        });
+      }
+    }
+  }
+
   const counts = Object.values(shiftCounts);
   const maxCount = Math.max(...counts);
   const minCount = Math.min(...counts);
   
-  if (maxCount - minCount > 3) {
+  if (maxCount - minCount > 5) {
     return { success: false, reason: `班次数差距过大（最大${maxCount}，最小${minCount}）` };
   }
 
-  return { success: true, schedule, shiftCounts };
+  return { success: true, schedule, shiftCounts, skillWarnings };
 }
 
-function validateSwap(schedule, nurses, requester_id, target_id, date, requester_shift, target_shift) {
+function validateSwap(schedule, nurses, requester_id, target_id, date, requester_shift, target_shift, nurseSkillsList = [], shiftRequirementsList = []) {
   const testSchedules = schedule.filter(s => 
     !(s.nurse_id === requester_id && s.date === date) && 
     !(s.nurse_id === target_id && s.date === date)
@@ -222,10 +333,20 @@ function validateSwap(schedule, nurses, requester_id, target_id, date, requester
     return { valid: false, reason: `${date} 换班后当天没有senior护士在岗` };
   }
 
+  if (nurseSkillsList.length > 0 && shiftRequirementsList.length > 0) {
+    const nurseSkillMap = buildNurseSkillMap(nurseSkillsList);
+    const shiftReqs = buildShiftRequirementsMap(shiftRequirementsList);
+    const missing = checkDaySkillCoverage(dayShifts, nurseSkillMap, shiftReqs);
+    if (missing.length > 0) {
+      const details = missing.map(m => `${SHIFT_NAMES_CN[m.shift]}需要"${m.skill_name}"技能`).join('、');
+      return { valid: false, reason: `${date} 换班后技能覆盖不足: ${details}` };
+    }
+  }
+
   return { valid: true };
 }
 
-function validateScheduleChange(schedule, nurses, change) {
+function validateScheduleChange(schedule, nurses, change, nurseSkillsList = [], shiftRequirementsList = []) {
   const { nurse_id, date, shift } = change;
   const nurse = nurses.find(n => n.id === nurse_id);
   
@@ -255,6 +376,16 @@ function validateScheduleChange(schedule, nurses, change) {
   const hasSeniorAny = dayShifts.some(s => nurses.find(n => n.id === s.nurse_id)?.level === 'senior');
   if (!hasSeniorAny) {
     return { valid: false, reason: `${date} 必须至少有1名senior护士在岗` };
+  }
+
+  if (nurseSkillsList.length > 0 && shiftRequirementsList.length > 0) {
+    const nurseSkillMap = buildNurseSkillMap(nurseSkillsList);
+    const shiftReqs = buildShiftRequirementsMap(shiftRequirementsList);
+    const missing = checkDaySkillCoverage(dayShifts, nurseSkillMap, shiftReqs);
+    if (missing.length > 0) {
+      const details = missing.map(m => `${SHIFT_NAMES_CN[m.shift]}需要"${m.skill_name}"技能`).join('、');
+      return { valid: false, reason: `${date} 调班后技能覆盖不足: ${details}` };
+    }
   }
 
   return { valid: true };

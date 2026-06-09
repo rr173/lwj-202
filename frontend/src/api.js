@@ -114,4 +114,28 @@ export const getAdverseEventStatistics = (params) =>
 export const getAdverseEventNurseStatistics = (deptId) =>
   api.get('/adverse-event-statistics/by-nurse', { params: { department_id: deptId } });
 
+export const getSkillTags = (deptId) =>
+  api.get(`/departments/${deptId}/skill-tags`);
+
+export const createSkillTag = (deptId, name) =>
+  api.post(`/departments/${deptId}/skill-tags`, { name });
+
+export const deleteSkillTag = (id) =>
+  api.delete(`/skill-tags/${id}`);
+
+export const getNurseSkills = (nurseId) =>
+  api.get(`/nurses/${nurseId}/skills`);
+
+export const updateNurseSkills = (nurseId, skillIds) =>
+  api.put(`/nurses/${nurseId}/skills`, { skill_ids: skillIds });
+
+export const getShiftSkillRequirements = (deptId) =>
+  api.get(`/departments/${deptId}/shift-skill-requirements`);
+
+export const updateShiftSkillRequirements = (deptId, requirements) =>
+  api.put(`/departments/${deptId}/shift-skill-requirements`, { requirements });
+
+export const getSkillCoverageReport = (deptId, month) =>
+  api.get(`/departments/${deptId}/skill-coverage-report`, { params: { month } });
+
 export default api;

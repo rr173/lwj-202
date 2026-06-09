@@ -184,6 +184,205 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+app.get('/api/departments/:id/skill-tags', (req, res) => {
+  const { id } = req.params;
+  db.all('SELECT * FROM skill_tags WHERE department_id = ? ORDER BY id', [id], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.post('/api/departments/:id/skill-tags', (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: '技能名称不能为空' });
+  db.run('INSERT INTO skill_tags (department_id, name) VALUES (?, ?)', [id, name.trim()], function(err) {
+    if (err) {
+      if (err.message.includes('UNIQUE')) return res.status(400).json({ error: '该技能标签已存在' });
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ id: this.lastID, department_id: parseInt(id), name: name.trim() });
+  });
+});
+
+app.delete('/api/skill-tags/:id', (req, res) => {
+  const { id } = req.params;
+  db.serialize(() => {
+    db.run('DELETE FROM nurse_skills WHERE skill_id = ?', [id]);
+    db.run('DELETE FROM shift_skill_requirements WHERE skill_id = ?', [id]);
+    db.run('DELETE FROM skill_tags WHERE id = ?', [id], function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true });
+    });
+  });
+});
+
+app.get('/api/nurses/:id/skills', (req, res) => {
+  const { id } = req.params;
+  db.all('SELECT ns.*, st.name as skill_name FROM nurse_skills ns JOIN skill_tags st ON ns.skill_id = st.id WHERE ns.nurse_id = ? ORDER BY st.name', [id], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.put('/api/nurses/:id/skills', (req, res) => {
+  const { id } = req.params;
+  const { skill_ids } = req.body;
+  if (!Array.isArray(skill_ids)) return res.status(400).json({ error: 'skill_ids必须为数组' });
+  db.serialize(() => {
+    db.run('BEGIN TRANSACTION');
+    db.run('DELETE FROM nurse_skills WHERE nurse_id = ?', [id], (err) => {
+      if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+    });
+    if (skill_ids.length > 0) {
+      const stmt = db.prepare('INSERT INTO nurse_skills (nurse_id, skill_id) VALUES (?, ?)');
+      let completed = 0;
+      skill_ids.forEach(skillId => {
+        stmt.run(id, skillId, (err) => {
+          if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+          completed++;
+          if (completed === skill_ids.length) {
+            stmt.finalize((err) => {
+              if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+              db.run('COMMIT', (err) => {
+                if (err) return res.status(500).json({ error: err.message });
+                res.json({ success: true });
+              });
+            });
+          }
+        });
+      });
+    } else {
+      db.run('COMMIT', (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
+      });
+    }
+  });
+});
+
+app.get('/api/departments/:id/shift-skill-requirements', (req, res) => {
+  const { id } = req.params;
+  db.all('SELECT ssr.*, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ? ORDER BY ssr.shift, st.name', [id], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.put('/api/departments/:id/shift-skill-requirements', (req, res) => {
+  const { id } = req.params;
+  const { requirements } = req.body;
+  if (!Array.isArray(requirements)) return res.status(400).json({ error: 'requirements必须为数组' });
+  db.serialize(() => {
+    db.run('BEGIN TRANSACTION');
+    db.run('DELETE FROM shift_skill_requirements WHERE department_id = ?', [id], (err) => {
+      if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+    });
+    if (requirements.length > 0) {
+      const stmt = db.prepare('INSERT INTO shift_skill_requirements (department_id, shift, skill_id) VALUES (?, ?, ?)');
+      let completed = 0;
+      requirements.forEach(r => {
+        stmt.run(id, r.shift, r.skill_id, (err) => {
+          if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+          completed++;
+          if (completed === requirements.length) {
+            stmt.finalize((err) => {
+              if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+              db.run('COMMIT', (err) => {
+                if (err) return res.status(500).json({ error: err.message });
+                res.json({ success: true });
+              });
+            });
+          }
+        });
+      });
+    } else {
+      db.run('COMMIT', (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true });
+      });
+    }
+  });
+});
+
+app.get('/api/departments/:id/skill-coverage-report', (req, res) => {
+  const { id } = req.params;
+  const { month } = req.query;
+  if (!month) return res.status(400).json({ error: '请提供月份参数' });
+
+  db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ? ORDER BY ssr.shift', [id], (err, requirements) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    if (requirements.length === 0) {
+      return res.json({ month, requirements: [], unmet: [], total_shifts: 0, met_count: 0, unmet_count: 0 });
+    }
+
+    db.all('SELECT s.date, s.shift, s.nurse_id FROM schedules s WHERE s.department_id = ? AND s.month = ?', [id, month], (err, schedules) => {
+      if (err) return res.status(500).json({ error: err.message });
+
+      db.all('SELECT ns.nurse_id, ns.skill_id FROM nurse_skills ns JOIN nurses n ON ns.nurse_id = n.id WHERE n.department_id = ?', [id], (err, nurseSkills) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        const nurseSkillMap = {};
+        nurseSkills.forEach(ns => {
+          if (!nurseSkillMap[ns.nurse_id]) nurseSkillMap[ns.nurse_id] = new Set();
+          nurseSkillMap[ns.nurse_id].add(ns.skill_id);
+        });
+
+        const shiftReqs = {};
+        requirements.forEach(r => {
+          const key = r.shift;
+          if (!shiftReqs[key]) shiftReqs[key] = [];
+          shiftReqs[key].push({ skill_id: r.skill_id, skill_name: r.skill_name });
+        });
+
+        const dates = [...new Set(schedules.map(s => s.date))].sort();
+        const unmet = [];
+        let totalShifts = 0;
+
+        dates.forEach(date => {
+          Object.keys(shiftReqs).forEach(shift => {
+            totalShifts++;
+            const nursesInShift = schedules.filter(s => s.date === date && s.shift === shift);
+            const nurseSkillIds = new Set();
+            nursesInShift.forEach(s => {
+              if (nurseSkillMap[s.nurse_id]) {
+                nurseSkillMap[s.nurse_id].forEach(sid => nurseSkillIds.add(sid));
+              }
+            });
+
+            shiftReqs[shift].forEach(req => {
+              if (!nurseSkillIds.has(req.skill_id)) {
+                unmet.push({
+                  date,
+                  shift,
+                  shift_name: shift === 'morning' ? '早班' : shift === 'afternoon' ? '中班' : '夜班',
+                  skill_id: req.skill_id,
+                  skill_name: req.skill_name
+                });
+              }
+            });
+          });
+        });
+
+        res.json({
+          month,
+          requirements: requirements.map(r => ({
+            shift: r.shift,
+            shift_name: r.shift === 'morning' ? '早班' : r.shift === 'afternoon' ? '中班' : '夜班',
+            skill_id: r.skill_id,
+            skill_name: r.skill_name
+          })),
+          unmet,
+          total_shifts: totalShifts,
+          met_count: totalShifts - unmet.length,
+          unmet_count: unmet.length
+        });
+      });
+    });
+  });
+});
+
 app.use('/api', trainingRouter);
 app.use('/api', adverseEventRouter);
 
@@ -208,11 +407,30 @@ app.post('/api/departments', (req, res) => {
 
 app.get('/api/departments/:id/nurses', (req, res) => {
   const { id } = req.params;
-  db.all('SELECT * FROM nurses WHERE department_id = ? ORDER BY id', [id], (err, rows) => {
+  db.all('SELECT * FROM nurses WHERE department_id = ? ORDER BY id', [id], (err, nurses) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-    res.json(rows);
+
+    const nurseIds = nurses.map(n => n.id);
+    if (nurseIds.length === 0) return res.json(nurses);
+
+    const placeholders = nurseIds.map(() => '?').join(',');
+    db.all(`SELECT ns.nurse_id, ns.skill_id, st.name as skill_name FROM nurse_skills ns JOIN skill_tags st ON ns.skill_id = st.id WHERE ns.nurse_id IN (${placeholders}) ORDER BY st.name`, nurseIds, (err, skills) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      const skillMap = {};
+      skills.forEach(s => {
+        if (!skillMap[s.nurse_id]) skillMap[s.nurse_id] = [];
+        skillMap[s.nurse_id].push({ skill_id: s.skill_id, skill_name: s.skill_name });
+      });
+      const result = nurses.map(n => ({
+        ...n,
+        skills: skillMap[n.id] || []
+      }));
+      res.json(result);
+    });
   });
 });
 
@@ -269,7 +487,13 @@ app.get('/api/departments/:id/schedule', (req, res) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-    res.json(rows);
+
+    db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ? ORDER BY ssr.shift', [id], (err, requirements) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ schedules: rows, shift_skill_requirements: requirements });
+    });
   });
 });
 
@@ -298,31 +522,43 @@ app.post('/api/departments/:id/generate-schedule', (req, res) => {
         return res.status(500).json({ error: err.message });
       }
 
-      const result = generateSchedule(id, nurses, month, unavailableDates);
-
-      if (!result.success) {
-        return res.status(400).json({ error: result.reason });
-      }
-
-      db.run('DELETE FROM schedules WHERE department_id = ? AND month = ?', [id, month], function(err) {
+      db.all('SELECT ns.nurse_id, ns.skill_id FROM nurse_skills ns JOIN nurses n ON ns.nurse_id = n.id WHERE n.department_id = ?', [id], (err, nurseSkills) => {
         if (err) {
           return res.status(500).json({ error: err.message });
         }
 
-        const stmt = db.prepare('INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)');
-        result.schedule.forEach(s => {
-          stmt.run(s.department_id, s.nurse_id, s.date, s.shift, s.month);
-        });
-        stmt.finalize((err) => {
+        db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ?', [id], (err, shiftRequirements) => {
           if (err) {
             return res.status(500).json({ error: err.message });
           }
-          const today = dayjs().format('YYYY-MM-DD');
-          compute7DayHours(db, id, today).then(fatigueData => {
-            const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
-            res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings });
-          }).catch(() => {
-            res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings: [] });
+
+          const result = generateSchedule(id, nurses, month, unavailableDates, nurseSkills, shiftRequirements);
+
+          if (!result.success) {
+            return res.status(400).json({ error: result.reason });
+          }
+
+          db.run('DELETE FROM schedules WHERE department_id = ? AND month = ?', [id, month], function(err) {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+
+            const stmt = db.prepare('INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)');
+            result.schedule.forEach(s => {
+              stmt.run(s.department_id, s.nurse_id, s.date, s.shift, s.month);
+            });
+            stmt.finalize((err) => {
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+              const today = dayjs().format('YYYY-MM-DD');
+              compute7DayHours(db, id, today).then(fatigueData => {
+                const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings, skill_warnings: result.skillWarnings || [] });
+              }).catch(() => {
+                res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings: [], skill_warnings: result.skillWarnings || [] });
+              });
+            });
           });
         });
       });
@@ -362,11 +598,33 @@ app.put('/api/schedules/:id', (req, res) => {
           return res.status(400).json({ error: validation.reason });
         }
 
-        db.run('UPDATE schedules SET nurse_id = ? WHERE id = ?', [nurse_id, id], function(err) {
+        db.all('SELECT ns.nurse_id, ns.skill_id FROM nurse_skills ns JOIN nurses n ON ns.nurse_id = n.id WHERE n.department_id = ?', [schedule.department_id], (err, nurseSkills) => {
           if (err) {
             return res.status(500).json({ error: err.message });
           }
-          res.json({ success: true });
+
+          db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ?', [schedule.department_id], (err, shiftRequirements) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
+
+            const skillValidation = validateScheduleChange(allSchedules, nurses, {
+              nurse_id,
+              date: schedule.date,
+              shift: schedule.shift
+            }, nurseSkills, shiftRequirements);
+
+            if (!skillValidation.valid) {
+              return res.status(400).json({ error: skillValidation.reason });
+            }
+
+            db.run('UPDATE schedules SET nurse_id = ? WHERE id = ?', [nurse_id, id], function(err) {
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+              res.json({ success: true });
+            });
+          });
         });
       });
     });
@@ -481,21 +739,28 @@ app.put('/api/swap-requests/:id/approve', (req, res) => {
             return res.status(400).json({ error: validation.reason });
           }
 
-          db.serialize(() => {
-            db.run('BEGIN TRANSACTION');
+          db.all('SELECT ns.nurse_id, ns.skill_id FROM nurse_skills ns JOIN nurses n ON ns.nurse_id = n.id WHERE n.department_id = ?', [department_id], (err, nurseSkills) => {
+            if (err) {
+              return res.status(500).json({ error: err.message });
+            }
 
-            db.run(
-              'DELETE FROM schedules WHERE department_id = ? AND date = ? AND nurse_id = ? AND shift = ?',
-              [department_id, date, requester_id, requester_shift],
-              function(err) {
-                if (err) {
-                  db.run('ROLLBACK');
-                  return res.status(500).json({ error: err.message });
-                }
+            db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ?', [department_id], (err, shiftRequirements) => {
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+
+              const skillValidation = validateSwap(schedules, nurses, requester_id, target_id, date, requester_shift, target_shift, nurseSkills, shiftRequirements);
+              
+              if (!skillValidation.valid) {
+                return res.status(400).json({ error: skillValidation.reason });
+              }
+
+              db.serialize(() => {
+                db.run('BEGIN TRANSACTION');
 
                 db.run(
                   'DELETE FROM schedules WHERE department_id = ? AND date = ? AND nurse_id = ? AND shift = ?',
-                  [department_id, date, target_id, target_shift],
+                  [department_id, date, requester_id, requester_shift],
                   function(err) {
                     if (err) {
                       db.run('ROLLBACK');
@@ -503,8 +768,8 @@ app.put('/api/swap-requests/:id/approve', (req, res) => {
                     }
 
                     db.run(
-                      'INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)',
-                      [department_id, target_id, date, requester_shift, month],
+                      'DELETE FROM schedules WHERE department_id = ? AND date = ? AND nurse_id = ? AND shift = ?',
+                      [department_id, date, target_id, target_shift],
                       function(err) {
                         if (err) {
                           db.run('ROLLBACK');
@@ -513,40 +778,51 @@ app.put('/api/swap-requests/:id/approve', (req, res) => {
 
                         db.run(
                           'INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)',
-                          [department_id, requester_id, date, target_shift, month],
+                          [department_id, target_id, date, requester_shift, month],
                           function(err) {
                             if (err) {
                               db.run('ROLLBACK');
                               return res.status(500).json({ error: err.message });
                             }
 
-                            db.run('UPDATE swap_requests SET status = ? WHERE id = ?', ['approved', id], function(err) {
-                              if (err) {
-                                db.run('ROLLBACK');
-                                return res.status(500).json({ error: err.message });
-                              }
-
-                              db.run('COMMIT', (err) => {
+                            db.run(
+                              'INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)',
+                              [department_id, requester_id, date, target_shift, month],
+                              function(err) {
                                 if (err) {
+                                  db.run('ROLLBACK');
                                   return res.status(500).json({ error: err.message });
                                 }
-                                const today = dayjs().format('YYYY-MM-DD');
-                                compute7DayHoursForNurses(db, [requester_id, target_id], department_id, today).then(fatigueData => {
-                                  const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
-                                  res.json({ success: true, fatigue_warnings });
-                                }).catch(() => {
-                                  res.json({ success: true, fatigue_warnings: [] });
+
+                                db.run('UPDATE swap_requests SET status = ? WHERE id = ?', ['approved', id], function(err) {
+                                  if (err) {
+                                    db.run('ROLLBACK');
+                                    return res.status(500).json({ error: err.message });
+                                  }
+
+                                  db.run('COMMIT', (err) => {
+                                    if (err) {
+                                      return res.status(500).json({ error: err.message });
+                                    }
+                                    const today = dayjs().format('YYYY-MM-DD');
+                                    compute7DayHoursForNurses(db, [requester_id, target_id], department_id, today).then(fatigueData => {
+                                      const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                                      res.json({ success: true, fatigue_warnings });
+                                    }).catch(() => {
+                                      res.json({ success: true, fatigue_warnings: [] });
+                                    });
+                                  });
                                 });
-                              });
-                            });
+                              }
+                            );
                           }
                         );
                       }
                     );
                   }
                 );
-              }
-            );
+              });
+            });
           });
         });
       }

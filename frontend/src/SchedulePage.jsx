@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { 
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
-  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert
+  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert, Checkbox
 } from 'antd';
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
@@ -12,7 +12,11 @@ import {
   getMonthlyReport,
   getLeaveRequests, createLeaveRequest, approveLeaveRequest, rejectLeaveRequest,
   confirmSubstitute, manualSubstitute, getLeaveSummary, getAvailableSubstitutes,
-  getFatigueStatus
+  getFatigueStatus,
+  getSkillTags, createSkillTag, deleteSkillTag,
+  updateNurseSkills,
+  getShiftSkillRequirements, updateShiftSkillRequirements,
+  getSkillCoverageReport
 } from './api';
 
 const { Option } = Select;
@@ -55,6 +59,8 @@ const SUBSTITUTE_STATUS = {
   none: { text: '无补班', color: 'default' },
   manual: { text: '需手动协调', color: 'red' }
 };
+
+const SHIFTS = ['morning', 'afternoon', 'night'];
 
 function FatigueWarningBanner({ fatigueData, expanded, onToggle }) {
   const warningNurses = (fatigueData || []).filter(n => n.is_fatigue_warning);
@@ -117,6 +123,16 @@ function SchedulePage() {
   const [approveConfirmVisible, setApproveConfirmVisible] = useState(false);
   const [approveAction, setApproveAction] = useState(null);
   const [approveWarnings, setApproveWarnings] = useState([]);
+  const [skillTags, setSkillTags] = useState([]);
+  const [shiftSkillReqs, setShiftSkillReqs] = useState([]);
+  const [skillCoverageReport, setSkillCoverageReport] = useState(null);
+  const [nurseSkillModalVisible, setNurseSkillModalVisible] = useState(false);
+  const [editingNurse, setEditingNurse] = useState(null);
+  const [editingNurseSkills, setEditingNurseSkills] = useState([]);
+  const [skillReqModalVisible, setSkillReqModalVisible] = useState(false);
+  const [editingSkillReqs, setEditingSkillReqs] = useState([]);
+  const [newSkillName, setNewSkillName] = useState('');
+  const [coverageReportVisible, setCoverageReportVisible] = useState(false);
 
   const fatigueMap = {};
   (fatigueData || []).forEach(f => {
@@ -137,6 +153,9 @@ function SchedulePage() {
       loadMonthlyReport();
       loadLeaveSummary();
       loadFatigueStatus();
+      loadSkillTags();
+      loadShiftSkillReqs();
+      loadSkillCoverageReport();
     }
   }, [selectedDept, month]);
 
@@ -166,7 +185,12 @@ function SchedulePage() {
     if (!selectedDept) return;
     try {
       const res = await getSchedule(selectedDept.id, month.format('YYYY-MM'));
-      setSchedule(res.data);
+      if (res.data.schedules) {
+        setSchedule(res.data.schedules);
+        setShiftSkillReqs(res.data.shift_skill_requirements || []);
+      } else {
+        setSchedule(res.data);
+      }
     } catch (err) {
       message.error('加载排班表失败');
     }
@@ -232,6 +256,108 @@ function SchedulePage() {
     }
   };
 
+  const loadSkillTags = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getSkillTags(selectedDept.id);
+      setSkillTags(res.data);
+    } catch (err) {
+      setSkillTags([]);
+    }
+  };
+
+  const loadShiftSkillReqs = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getShiftSkillRequirements(selectedDept.id);
+      setShiftSkillReqs(res.data);
+    } catch (err) {
+      setShiftSkillReqs([]);
+    }
+  };
+
+  const loadSkillCoverageReport = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getSkillCoverageReport(selectedDept.id, month.format('YYYY-MM'));
+      setSkillCoverageReport(res.data);
+    } catch (err) {
+      setSkillCoverageReport(null);
+    }
+  };
+
+  const handleAddSkillTag = async () => {
+    if (!newSkillName.trim()) {
+      message.error('技能名称不能为空');
+      return;
+    }
+    try {
+      await createSkillTag(selectedDept.id, newSkillName.trim());
+      setNewSkillName('');
+      loadSkillTags();
+      message.success('技能标签添加成功');
+    } catch (err) {
+      message.error(`添加失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleDeleteSkillTag = async (id) => {
+    try {
+      await deleteSkillTag(id);
+      loadSkillTags();
+      loadShiftSkillReqs();
+      loadNurses();
+      message.success('技能标签已删除');
+    } catch (err) {
+      message.error(`删除失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleOpenNurseSkillModal = (nurse) => {
+    setEditingNurse(nurse);
+    setEditingNurseSkills((nurse.skills || []).map(s => s.skill_id));
+    setNurseSkillModalVisible(true);
+  };
+
+  const handleSaveNurseSkills = async () => {
+    try {
+      await updateNurseSkills(editingNurse.id, editingNurseSkills);
+      message.success('护士技能更新成功');
+      setNurseSkillModalVisible(false);
+      loadNurses();
+      loadSkillCoverageReport();
+    } catch (err) {
+      message.error(`更新失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleOpenSkillReqModal = () => {
+    const initial = {};
+    SHIFTS.forEach(shift => {
+      initial[shift] = shiftSkillReqs.filter(r => r.shift === shift).map(r => r.skill_id);
+    });
+    setEditingSkillReqs(initial);
+    setSkillReqModalVisible(true);
+  };
+
+  const handleSaveSkillReqs = async () => {
+    try {
+      const requirements = [];
+      Object.keys(editingSkillReqs).forEach(shift => {
+        editingSkillReqs[shift].forEach(skillId => {
+          requirements.push({ shift, skill_id: skillId });
+        });
+      });
+      await updateShiftSkillRequirements(selectedDept.id, requirements);
+      message.success('班次技能要求更新成功');
+      setSkillReqModalVisible(false);
+      loadShiftSkillReqs();
+      loadSkillCoverageReport();
+    } catch (err) {
+      message.error(`更新失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
   const handleGenerateSchedule = async () => {
     if (!selectedDept) return;
     setLoading(true);
@@ -242,9 +368,20 @@ function SchedulePage() {
         const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
         message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
       }
+      if (res.data.skill_warnings && res.data.skill_warnings.length > 0) {
+        const summary = {};
+        res.data.skill_warnings.forEach(w => {
+          const key = `${w.shift_name}-${w.skill_name}`;
+          if (!summary[key]) summary[key] = { ...w, count: 0 };
+          summary[key].count++;
+        });
+        const details = Object.values(summary).map(s => `${s.shift_name}缺"${s.skill_name}"(${s.count}天)`).join('、');
+        message.warning({ content: `技能覆盖不足：${details}，建议调整护士技能或班次要求`, duration: 10 });
+      }
       loadSchedule();
       loadMonthlyReport();
       loadFatigueStatus();
+      loadSkillCoverageReport();
     } catch (err) {
       message.error(`排班生成失败: ${err.response?.data?.error || err.message}`);
     }
@@ -327,6 +464,7 @@ function SchedulePage() {
       loadSchedule();
       loadMonthlyReport();
       loadFatigueStatus();
+      loadSkillCoverageReport();
     } catch (err) {
       message.error(`审批失败: ${err.response?.data?.error || err.message}`);
     }
@@ -1156,9 +1294,19 @@ function SchedulePage() {
                             <div style={{ fontSize: '12px', color: nurse.level === 'senior' ? '#fa8c16' : '#999' }}>
                               {nurse.level === 'senior' ? '资深' : '普通'}
                             </div>
+                            {nurse.skills && nurse.skills.length > 0 && (
+                              <div style={{ marginTop: '4px', display: 'flex', flexWrap: 'wrap', gap: '2px' }}>
+                                {nurse.skills.map(s => (
+                                  <Tag key={s.skill_id} style={{ fontSize: '10px', padding: '0 4px', lineHeight: '16px', margin: 0 }} color="blue">{s.skill_name}</Tag>
+                                ))}
+                              </div>
+                            )}
                             {isFatigue && (
                               <div style={{ fontSize: '11px', color: '#fa8c16', marginTop: '2px' }}>⚠ 疲劳预警</div>
                             )}
+                            <Button size="small" type="link" style={{ fontSize: '11px', padding: 0, height: 'auto' }} onClick={() => handleOpenNurseSkillModal(nurse)}>
+                              编辑技能
+                            </Button>
                           </td>
                           {days.map(day => {
                             const dateStr = day.format('YYYY-MM-DD');
@@ -1197,6 +1345,11 @@ function SchedulePage() {
                                     onClick={() => handleCellClick(nurse, dateStr, shift.shift, shift.id)}
                                   >
                                     {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : SHIFT_NAMES[shift.shift]}
+                                    {shiftSkillReqs.filter(r => r.shift === shift.shift).length > 0 && !isLeave && (
+                                      <Tooltip title={`技能要求: ${shiftSkillReqs.filter(r => r.shift === shift.shift).map(r => r.skill_name).join(', ')}`}>
+                                        <span style={{ marginLeft: '4px', fontSize: '10px' }}>🔧</span>
+                                      </Tooltip>
+                                    )}
                                   </div>
                                 )}
                                 {isSubstitute && (
@@ -1289,6 +1442,56 @@ function SchedulePage() {
                 size="small"
                 pagination={false}
               />
+            </div>
+
+            <div style={{ background: '#fff', padding: '24px', borderRadius: '8px', marginTop: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 style={{ margin: 0 }}>技能管理</h3>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <Button size="small" onClick={handleOpenSkillReqModal}>班次技能要求</Button>
+                  <Button size="small" type="primary" onClick={() => {
+                    setCoverageReportVisible(true);
+                    loadSkillCoverageReport();
+                  }}>技能覆盖率报告</Button>
+                </div>
+              </div>
+              
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ fontSize: '14px', fontWeight: '500', marginBottom: '8px' }}>技能标签</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+                  {skillTags.map(tag => (
+                    <Tag key={tag.id} closable onClose={() => handleDeleteSkillTag(tag.id)} color="blue">
+                      {tag.name}
+                    </Tag>
+                  ))}
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <Input 
+                      size="small" 
+                      placeholder="新技能名称" 
+                      value={newSkillName} 
+                      onChange={(e) => setNewSkillName(e.target.value)}
+                      onPressEnter={handleAddSkillTag}
+                      style={{ width: '120px' }}
+                    />
+                    <Button size="small" type="primary" onClick={handleAddSkillTag}>添加</Button>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: '14px', fontWeight: '500', marginBottom: '8px' }}>班次技能要求</div>
+                {SHIFTS.map(shift => {
+                  const reqs = shiftSkillReqs.filter(r => r.shift === shift);
+                  return (
+                    <div key={shift} style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Tag color={SHIFT_COLORS[shift]}>{SHIFT_NAMES[shift]}</Tag>
+                      {reqs.length > 0 ? reqs.map(r => (
+                        <Tag key={r.skill_id} color="orange">{r.skill_name}</Tag>
+                      )) : <span style={{ color: '#999', fontSize: '12px' }}>无技能要求</span>}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </Content>
           <Sider width={350} theme="light" style={{ borderLeft: '1px solid #e8e8e8' }}>
@@ -1506,6 +1709,125 @@ function SchedulePage() {
             </div>
           ))}
         </div>
+      </Modal>
+
+      <Modal
+        title={`编辑护士技能 - ${editingNurse?.name || ''}`}
+        open={nurseSkillModalVisible}
+        onOk={handleSaveNurseSkills}
+        onCancel={() => setNurseSkillModalVisible(false)}
+        okText="保存"
+        cancelText="取消"
+      >
+        <div style={{ marginBottom: '12px' }}>
+          {skillTags.length === 0 ? (
+            <div style={{ color: '#999', textAlign: 'center', padding: '16px' }}>
+              暂无技能标签，请先在技能管理区域添加
+            </div>
+          ) : (
+            <Checkbox.Group
+              value={editingNurseSkills}
+              onChange={(values) => setEditingNurseSkills(values)}
+              style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}
+            >
+              {skillTags.map(tag => (
+                <Checkbox key={tag.id} value={tag.id}>{tag.name}</Checkbox>
+              ))}
+            </Checkbox.Group>
+          )}
+        </div>
+      </Modal>
+
+      <Modal
+        title="编辑班次技能要求"
+        open={skillReqModalVisible}
+        onOk={handleSaveSkillReqs}
+        onCancel={() => setSkillReqModalVisible(false)}
+        okText="保存"
+        cancelText="取消"
+        width={600}
+      >
+        {SHIFTS.map(shift => (
+          <div key={shift} style={{ marginBottom: '16px' }}>
+            <div style={{ fontWeight: '500', marginBottom: '8px' }}>
+              <Tag color={SHIFT_COLORS[shift]}>{SHIFT_NAMES[shift]}</Tag>
+            </div>
+            <Checkbox.Group
+              value={editingSkillReqs[shift] || []}
+              onChange={(values) => setEditingSkillReqs({ ...editingSkillReqs, [shift]: values })}
+              style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}
+            >
+              {skillTags.map(tag => (
+                <Checkbox key={tag.id} value={tag.id}>{tag.name}</Checkbox>
+              ))}
+            </Checkbox.Group>
+          </div>
+        ))}
+      </Modal>
+
+      <Modal
+        title="技能覆盖率报告"
+        open={coverageReportVisible}
+        onCancel={() => setCoverageReportVisible(false)}
+        footer={null}
+        width={700}
+      >
+        {skillCoverageReport ? (
+          <div>
+            <div style={{ marginBottom: '16px', display: 'flex', gap: '16px' }}>
+              <div style={{ padding: '12px', background: '#f6ffed', borderRadius: '4px', flex: 1, textAlign: 'center' }}>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#52c41a' }}>{skillCoverageReport.met_count}</div>
+                <div style={{ fontSize: '12px', color: '#666' }}>已满足班次</div>
+              </div>
+              <div style={{ padding: '12px', background: '#fff2f0', borderRadius: '4px', flex: 1, textAlign: 'center' }}>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ff4d4f' }}>{skillCoverageReport.unmet_count}</div>
+                <div style={{ fontSize: '12px', color: '#666' }}>未满足班次</div>
+              </div>
+              <div style={{ padding: '12px', background: '#e6f7ff', borderRadius: '4px', flex: 1, textAlign: 'center' }}>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#1890ff' }}>{skillCoverageReport.total_shifts}</div>
+                <div style={{ fontSize: '12px', color: '#666' }}>总班次数</div>
+              </div>
+            </div>
+
+            {skillCoverageReport.requirements.length > 0 && (
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ fontWeight: '500', marginBottom: '8px' }}>技能要求配置</div>
+                {SHIFTS.map(shift => {
+                  const reqs = skillCoverageReport.requirements.filter(r => r.shift === shift);
+                  if (reqs.length === 0) return null;
+                  return (
+                    <div key={shift} style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Tag color={SHIFT_COLORS[shift]}>{SHIFT_NAMES[shift]}</Tag>
+                      {reqs.map(r => <Tag key={r.skill_id} color="orange">{r.skill_name}</Tag>)}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {skillCoverageReport.unmet.length > 0 ? (
+              <div>
+                <div style={{ fontWeight: '500', marginBottom: '8px', color: '#ff4d4f' }}>未满足列表</div>
+                <Table
+                  columns={[
+                    { title: '日期', dataIndex: 'date', key: 'date', width: 120 },
+                    { title: '班次', dataIndex: 'shift_name', key: 'shift_name', width: 80, render: (text, record) => <Tag color={SHIFT_COLORS[record.shift]}>{text}</Tag> },
+                    { title: '缺失技能', dataIndex: 'skill_name', key: 'skill_name', render: (text) => <Tag color="red">{text}</Tag> }
+                  ]}
+                  dataSource={skillCoverageReport.unmet}
+                  rowKey={(r, i) => `${r.date}-${r.shift}-${r.skill_id}-${i}`}
+                  size="small"
+                  pagination={false}
+                  scroll={{ y: 300 }}
+                />
+              </div>
+            ) : (
+              <Alert type="success" message="所有班次的技能要求均已满足" showIcon />
+            )}
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '24px', color: '#999' }}>加载中...</div>
+        )}
       </Modal>
     </Layout>
   );

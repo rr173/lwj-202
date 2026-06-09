@@ -152,6 +152,36 @@ db.serialize(() => {
     FOREIGN KEY (event_id) REFERENCES adverse_events(id)
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS skill_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(department_id, name)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS nurse_skills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nurse_id INTEGER NOT NULL,
+    skill_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (skill_id) REFERENCES skill_tags(id),
+    UNIQUE(nurse_id, skill_id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS shift_skill_requirements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    shift TEXT NOT NULL CHECK(shift IN ('morning', 'afternoon', 'night')),
+    skill_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (skill_id) REFERENCES skill_tags(id),
+    UNIQUE(department_id, shift, skill_id)
+  )`);
+
   db.run(`CREATE TABLE IF NOT EXISTS training_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     department_id INTEGER NOT NULL,
