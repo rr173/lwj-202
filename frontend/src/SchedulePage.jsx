@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { 
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
-  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert, Checkbox
+  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert, Checkbox, Progress, InputNumber
 } from 'antd';
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
@@ -16,7 +16,8 @@ import {
   getSkillTags, createSkillTag, deleteSkillTag,
   updateNurseSkills,
   getShiftSkillRequirements, updateShiftSkillRequirements,
-  getSkillCoverageReport
+  getSkillCoverageReport,
+  getNurseLeaveBalance, getLeaveQuotaOverview, getLeaveQuotaConfig, updateLeaveQuotaConfig
 } from './api';
 
 const { Option } = Select;
@@ -93,6 +94,31 @@ function FatigueWarningBanner({ fatigueData, expanded, onToggle }) {
   );
 }
 
+function LeaveQuotaInline({ nurseId, leaveBalances }) {
+  const balance = leaveBalances[nurseId];
+  if (!balance) return null;
+  return (
+    <div style={{ fontSize: '12px', padding: '6px 8px', background: '#f0f5ff', borderRadius: '4px', marginBottom: '8px', border: '1px solid #d6e4ff' }}>
+      <div style={{ fontWeight: '500', marginBottom: '4px', color: '#1890ff' }}>假期额度</div>
+      <div style={{ display: 'flex', gap: '12px' }}>
+        {['annual', 'sick', 'personal'].map(type => {
+          const q = balance[type];
+          if (!q) return null;
+          const isExhausted = q.remaining <= 0;
+          return (
+            <span key={type} style={{ color: isExhausted ? '#ff4d4f' : '#666' }}>
+              {LEAVE_TYPE_NAMES[type]}: {q.used}/{q.total}天
+              <span style={{ color: isExhausted ? '#ff4d4f' : '#52c41a', marginLeft: '2px' }}>
+                ({isExhausted ? '已用完' : `余${q.remaining}天`})
+              </span>
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function SchedulePage() {
   const [departments, setDepartments] = useState([]);
   const [selectedDept, setSelectedDept] = useState(null);
@@ -133,6 +159,11 @@ function SchedulePage() {
   const [editingSkillReqs, setEditingSkillReqs] = useState([]);
   const [newSkillName, setNewSkillName] = useState('');
   const [coverageReportVisible, setCoverageReportVisible] = useState(false);
+  const [leaveBalances, setLeaveBalances] = useState({});
+  const [leaveQuotaOverview, setLeaveQuotaOverview] = useState([]);
+  const [leaveQuotaConfig, setLeaveQuotaConfig] = useState(null);
+  const [quotaConfigModalVisible, setQuotaConfigModalVisible] = useState(false);
+  const [editingQuotaConfig, setEditingQuotaConfig] = useState({ sick_days: 15, personal_days: 5 });
 
   const fatigueMap = {};
   (fatigueData || []).forEach(f => {
@@ -156,6 +187,8 @@ function SchedulePage() {
       loadSkillTags();
       loadShiftSkillReqs();
       loadSkillCoverageReport();
+      loadLeaveQuotaOverview();
+      loadLeaveQuotaConfig();
     }
   }, [selectedDept, month]);
 
@@ -221,6 +254,14 @@ function SchedulePage() {
     try {
       const res = await getLeaveRequests(selectedDept.id, null, month.format('YYYY-MM'));
       setLeaveRequests(res.data);
+      const nurseIds = [...new Set(res.data.map(r => r.nurse_id))];
+      nurseIds.forEach(nid => {
+        if (!leaveBalances[nid]) {
+          getNurseLeaveBalance(nid, month.year()).then(balance => {
+            if (balance) setLeaveBalances(prev => ({ ...prev, [nid]: balance }));
+          });
+        }
+      });
     } catch (err) {
       message.error('加载请假记录失败');
     }
@@ -283,6 +324,37 @@ function SchedulePage() {
       setSkillCoverageReport(res.data);
     } catch (err) {
       setSkillCoverageReport(null);
+    }
+  };
+
+  const loadLeaveQuotaOverview = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getLeaveQuotaOverview(selectedDept.id, month.year());
+      setLeaveQuotaOverview(res.data);
+    } catch (err) {
+      setLeaveQuotaOverview([]);
+    }
+  };
+
+  const loadLeaveQuotaConfig = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getLeaveQuotaConfig(selectedDept.id, month.year());
+      setLeaveQuotaConfig(res.data);
+      setEditingQuotaConfig({ sick_days: res.data.sick_days, personal_days: res.data.personal_days });
+    } catch (err) {
+      setLeaveQuotaConfig(null);
+    }
+  };
+
+  const loadNurseLeaveBalance = async (nurseId) => {
+    try {
+      const res = await getNurseLeaveBalance(nurseId, month.year());
+      setLeaveBalances(prev => ({ ...prev, [nurseId]: res.data }));
+      return res.data;
+    } catch (err) {
+      return null;
     }
   };
 
@@ -557,7 +629,9 @@ function SchedulePage() {
       message.success('请假申请已提交');
       setLeaveModalVisible(false);
       leaveForm.resetFields();
+      setLeaveBalances({});
       loadLeaveRequests();
+      loadLeaveQuotaOverview();
     } catch (err) {
       message.error(`提交失败: ${err.response?.data?.error || err.message}`);
     }
@@ -582,6 +656,7 @@ function SchedulePage() {
       loadMonthlyReport();
       loadLeaveSummary();
       loadFatigueStatus();
+      loadLeaveQuotaOverview();
     } catch (err) {
       message.error(`审批失败: ${err.response?.data?.error || err.message}`);
     }
@@ -978,6 +1053,7 @@ function SchedulePage() {
                   <div><strong>{req.nurse_name}</strong></div>
                   {req.reason && <div style={{ fontSize: '12px' }}>原因: {req.reason}</div>}
                 </div>
+                <LeaveQuotaInline nurseId={req.nurse_id} leaveBalances={leaveBalances} />
                 {req.status === 'approved' && (
                   <div style={{ fontSize: '13px', marginBottom: '8px', padding: '8px', background: '#e6f7ff', borderRadius: '4px', border: '1px solid #91d5ff' }}>
                     {req.substitute_status === 'pending' && req.substitute_name && (
@@ -1434,10 +1510,70 @@ function SchedulePage() {
             </div>
 
             <div style={{ background: '#fff', padding: '24px', borderRadius: '8px' }}>
-              <h3 style={{ marginTop: 0, marginBottom: '16px' }}>请假汇总</h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 style={{ marginTop: 0, marginBottom: 0 }}>假期额度总览</h3>
+                <Button size="small" onClick={() => {
+                  setEditingQuotaConfig({
+                    sick_days: leaveQuotaConfig?.sick_days || 15,
+                    personal_days: leaveQuotaConfig?.personal_days || 5
+                  });
+                  setQuotaConfigModalVisible(true);
+                }}>额度配置</Button>
+              </div>
               <Table
-                columns={leaveSummaryColumns}
-                dataSource={leaveSummary}
+                columns={[
+                  { title: '护士', dataIndex: 'nurse_name', key: 'nurse_name', width: 80 },
+                  { title: '工龄', dataIndex: 'years_of_service', key: 'years_of_service', width: 60, align: 'center', render: v => `${v}年` },
+                  {
+                    title: '年假',
+                    key: 'annual',
+                    width: 140,
+                    align: 'center',
+                    render: (_, r) => r.annual ? (
+                      <div>
+                        <span style={{ color: r.annual.remaining <= 0 ? '#ff4d4f' : '#1890ff' }}>
+                          {r.annual.used}/{r.annual.total}天
+                        </span>
+                        <span style={{ fontSize: '11px', color: r.annual.remaining <= 0 ? '#ff4d4f' : '#52c41a', marginLeft: '4px' }}>
+                          {r.annual.remaining <= 0 ? '已用完' : `余${r.annual.remaining}天`}
+                        </span>
+                      </div>
+                    ) : '-'
+                  },
+                  {
+                    title: '病假',
+                    key: 'sick',
+                    width: 140,
+                    align: 'center',
+                    render: (_, r) => r.sick ? (
+                      <div>
+                        <span style={{ color: r.sick.remaining <= 0 ? '#ff4d4f' : '#fa8c16' }}>
+                          {r.sick.used}/{r.sick.total}天
+                        </span>
+                        <span style={{ fontSize: '11px', color: r.sick.remaining <= 0 ? '#ff4d4f' : '#52c41a', marginLeft: '4px' }}>
+                          {r.sick.remaining <= 0 ? '已用完' : `余${r.sick.remaining}天`}
+                        </span>
+                      </div>
+                    ) : '-'
+                  },
+                  {
+                    title: '事假',
+                    key: 'personal',
+                    width: 140,
+                    align: 'center',
+                    render: (_, r) => r.personal ? (
+                      <div>
+                        <span style={{ color: r.personal.remaining <= 0 ? '#ff4d4f' : '#ff4d4f' }}>
+                          {r.personal.used}/{r.personal.total}天
+                        </span>
+                        <span style={{ fontSize: '11px', color: r.personal.remaining <= 0 ? '#ff4d4f' : '#52c41a', marginLeft: '4px' }}>
+                          {r.personal.remaining <= 0 ? '已用完' : `余${r.personal.remaining}天`}
+                        </span>
+                      </div>
+                    ) : '-'
+                  }
+                ]}
+                dataSource={leaveQuotaOverview}
                 rowKey="nurse_id"
                 size="small"
                 pagination={false}
@@ -1604,7 +1740,7 @@ function SchedulePage() {
             label="申请人" 
             rules={[{ required: true, message: '请选择申请人' }]}
           >
-            <Select placeholder="请选择护士">
+            <Select placeholder="请选择护士" onChange={(val) => loadNurseLeaveBalance(val)}>
               {nurses.map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
@@ -1613,6 +1749,34 @@ function SchedulePage() {
               ))}
             </Select>
           </Form.Item>
+          {leaveForm.getFieldValue('nurse') && leaveBalances[leaveForm.getFieldValue('nurse')] && (
+            <div style={{ marginBottom: '16px', padding: '12px', background: '#f6f6f6', borderRadius: '6px' }}>
+              <div style={{ fontWeight: '500', marginBottom: '8px', fontSize: '13px' }}>假期额度</div>
+              {['annual', 'sick', 'personal'].map(type => {
+                const b = leaveBalances[leaveForm.getFieldValue('nurse')][type];
+                if (!b) return null;
+                const percent = b.total > 0 ? Math.round((b.used / b.total) * 100) : 0;
+                const isExhausted = b.remaining <= 0;
+                return (
+                  <div key={type} style={{ marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ width: '40px', fontSize: '12px', color: isExhausted ? '#999' : LEAVE_TYPE_COLORS[type] }}>
+                      {LEAVE_TYPE_NAMES[type]}
+                    </span>
+                    <Progress 
+                      percent={percent} 
+                      size="small" 
+                      strokeColor={isExhausted ? '#d9d9d9' : LEAVE_TYPE_COLORS[type]}
+                      style={{ flex: 1, marginBottom: 0 }}
+                      format={() => `${b.used}/${b.total}天`}
+                    />
+                    <span style={{ fontSize: '12px', color: isExhausted ? '#ff4d4f' : '#52c41a', whiteSpace: 'nowrap' }}>
+                      {isExhausted ? '已用完' : `余${b.remaining}天`}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <Form.Item 
             name="date" 
             label="请假日期" 
@@ -1626,9 +1790,23 @@ function SchedulePage() {
             rules={[{ required: true, message: '请选择请假类型' }]}
           >
             <Select placeholder="请选择请假类型">
-              <Option value="personal">事假</Option>
-              <Option value="sick">病假</Option>
-              <Option value="annual">年假</Option>
+              {['personal', 'sick', 'annual'].map(type => {
+                const nurseId = leaveForm.getFieldValue('nurse');
+                const balance = nurseId && leaveBalances[nurseId] ? leaveBalances[nurseId][type] : null;
+                const isExhausted = balance && balance.remaining <= 0;
+                return (
+                  <Option key={type} value={type} disabled={!!isExhausted}>
+                    <span style={{ color: isExhausted ? '#d9d9d9' : 'inherit' }}>
+                      {LEAVE_TYPE_NAMES[type]}
+                    </span>
+                    {balance && (
+                      <span style={{ float: 'right', fontSize: '12px', color: isExhausted ? '#ff4d4f' : '#999' }}>
+                        {isExhausted ? '已用完' : `余${balance.remaining}天`}
+                      </span>
+                    )}
+                  </Option>
+                );
+              })}
             </Select>
           </Form.Item>
           <Form.Item name="reason" label="请假原因">
@@ -1828,6 +2006,56 @@ function SchedulePage() {
         ) : (
           <div style={{ textAlign: 'center', padding: '24px', color: '#999' }}>加载中...</div>
         )}
+      </Modal>
+
+      <Modal
+        title="假期额度配置"
+        open={quotaConfigModalVisible}
+        onOk={async () => {
+          try {
+            await updateLeaveQuotaConfig(selectedDept.id, {
+              year: month.year(),
+              sick_days: editingQuotaConfig.sick_days,
+              personal_days: editingQuotaConfig.personal_days
+            });
+            message.success('额度配置已更新');
+            setQuotaConfigModalVisible(false);
+            loadLeaveQuotaConfig();
+            loadLeaveQuotaOverview();
+          } catch (err) {
+            message.error(`更新失败: ${err.response?.data?.error || err.message}`);
+          }
+        }}
+        onCancel={() => setQuotaConfigModalVisible(false)}
+        okText="保存"
+        cancelText="取消"
+        width={450}
+      >
+        <div style={{ marginBottom: '12px', color: '#666', fontSize: '13px' }}>
+          配置 {month.year()} 年度 {selectedDept?.name} 的假期额度。年假天数按工龄自动计算（1-5年5天, 5-10年10天, 10年以上15天），无需手动设置。
+        </div>
+        <div style={{ display: 'flex', gap: '16px', marginBottom: '16px' }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ marginBottom: '4px', fontWeight: '500' }}>病假天数上限</div>
+            <InputNumber
+              min={1}
+              max={365}
+              value={editingQuotaConfig.sick_days}
+              onChange={(val) => setEditingQuotaConfig(prev => ({ ...prev, sick_days: val }))}
+              style={{ width: '100%' }}
+            />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ marginBottom: '4px', fontWeight: '500' }}>事假天数上限</div>
+            <InputNumber
+              min={1}
+              max={365}
+              value={editingQuotaConfig.personal_days}
+              onChange={(val) => setEditingQuotaConfig(prev => ({ ...prev, personal_days: val }))}
+              style={{ width: '100%' }}
+            />
+          </div>
+        </div>
       </Modal>
     </Layout>
   );

@@ -9,6 +9,66 @@ const adverseEventRouter = require('./adverseEvent');
 const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
 const FATIGUE_THRESHOLD = 48;
 
+const LEAVE_TYPE_NAMES_CN = { personal: '事假', sick: '病假', annual: '年假' };
+
+function computeAnnualDays(yearsOfService) {
+  if (yearsOfService < 5) return 5;
+  if (yearsOfService < 10) return 10;
+  return 15;
+}
+
+function getYearsOfService(hireDate, referenceDate) {
+  if (!hireDate) return 0;
+  const hire = dayjs(hireDate);
+  const ref = dayjs(referenceDate);
+  let years = ref.year() - hire.year();
+  if (ref.isBefore(hire.add(years, 'year'))) years--;
+  return Math.max(0, years);
+}
+
+function getLeaveBalance(db, nurseId, year) {
+  return new Promise((resolve, reject) => {
+    db.get('SELECT n.*, d.id as dept_id FROM nurses n JOIN departments d ON n.department_id = d.id WHERE n.id = ?', [nurseId], (err, nurse) => {
+      if (err) return reject(err);
+      if (!nurse) return reject(new Error('护士不存在'));
+
+      const janFirst = `${year}-01-01`;
+      const yearsOfService = getYearsOfService(nurse.hire_date, janFirst);
+      const annualTotal = computeAnnualDays(yearsOfService);
+
+      db.get('SELECT * FROM leave_quota_config WHERE department_id = ? AND year = ?', [nurse.department_id, String(year)], (err, config) => {
+        if (err) return reject(err);
+
+        const sickTotal = config ? config.sick_days : 15;
+        const personalTotal = config ? config.personal_days : 5;
+
+        const yearPrefix = `${year}-`;
+        db.all(
+          "SELECT leave_type, COUNT(*) as used_days FROM leave_requests WHERE nurse_id = ? AND date LIKE ? AND status = 'approved' GROUP BY leave_type",
+          [nurseId, `${yearPrefix}%`],
+          (err, usedRows) => {
+            if (err) return reject(err);
+
+            const usedMap = {};
+            usedRows.forEach(r => { usedMap[r.leave_type] = r.used_days; });
+
+            const balance = {
+              nurse_id: nurseId,
+              year,
+              years_of_service: yearsOfService,
+              annual: { total: annualTotal, used: usedMap.annual || 0, remaining: annualTotal - (usedMap.annual || 0) },
+              sick: { total: sickTotal, used: usedMap.sick || 0, remaining: sickTotal - (usedMap.sick || 0) },
+              personal: { total: personalTotal, used: usedMap.personal || 0, remaining: personalTotal - (usedMap.personal || 0) }
+            };
+
+            resolve(balance);
+          }
+        );
+      });
+    });
+  });
+}
+
 function compute7DayHours(db, departmentId, referenceDate) {
   return new Promise((resolve, reject) => {
     const endDate = referenceDate;
@@ -435,12 +495,12 @@ app.get('/api/departments/:id/nurses', (req, res) => {
 });
 
 app.post('/api/nurses', (req, res) => {
-  const { name, department_id, level } = req.body;
-  db.run('INSERT INTO nurses (name, department_id, level) VALUES (?, ?, ?)', [name, department_id, level], function(err) {
+  const { name, department_id, level, hire_date } = req.body;
+  db.run('INSERT INTO nurses (name, department_id, level, hire_date) VALUES (?, ?, ?, ?)', [name, department_id, level, hire_date || null], function(err) {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-    res.json({ id: this.lastID, name, department_id, level });
+    res.json({ id: this.lastID, name, department_id, level, hire_date: hire_date || null });
   });
 });
 
@@ -1084,6 +1144,96 @@ app.get('/api/departments/:id/monthly-report', (req, res) => {
   });
 });
 
+app.get('/api/nurses/:id/leave-balance', (req, res) => {
+  const { id } = req.params;
+  const year = req.query.year || dayjs().year();
+  getLeaveBalance(db, id, parseInt(year))
+    .then(balance => res.json(balance))
+    .catch(err => res.status(500).json({ error: err.message }));
+});
+
+app.get('/api/departments/:id/leave-quota-overview', (req, res) => {
+  const { id } = req.params;
+  const year = req.query.year || dayjs().year();
+  const yearInt = parseInt(year);
+
+  db.all('SELECT * FROM nurses WHERE department_id = ?', [id], (err, nurses) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    db.get('SELECT * FROM leave_quota_config WHERE department_id = ? AND year = ?', [id, String(yearInt)], (err, config) => {
+      if (err) return res.status(500).json({ error: err.message });
+
+      const sickTotal = config ? config.sick_days : 15;
+      const personalTotal = config ? config.personal_days : 5;
+
+      const yearPrefix = `${yearInt}-`;
+      const nurseIds = nurses.map(n => n.id);
+      if (nurseIds.length === 0) return res.json([]);
+
+      const placeholders = nurseIds.map(() => '?').join(',');
+      db.all(
+        `SELECT nurse_id, leave_type, COUNT(*) as used_days FROM leave_requests WHERE nurse_id IN (${placeholders}) AND date LIKE ? AND status = 'approved' GROUP BY nurse_id, leave_type`,
+        [...nurseIds, `${yearPrefix}%`],
+        (err, usedRows) => {
+          if (err) return res.status(500).json({ error: err.message });
+
+          const usedMap = {};
+          usedRows.forEach(r => {
+            if (!usedMap[r.nurse_id]) usedMap[r.nurse_id] = {};
+            usedMap[r.nurse_id][r.leave_type] = r.used_days;
+          });
+
+          const overview = nurses.map(nurse => {
+            const yearsOfService = getYearsOfService(nurse.hire_date, `${yearInt}-01-01`);
+            const annualTotal = computeAnnualDays(yearsOfService);
+            const nurseUsed = usedMap[nurse.id] || {};
+
+            return {
+              nurse_id: nurse.id,
+              nurse_name: nurse.name,
+              nurse_level: nurse.level,
+              years_of_service: yearsOfService,
+              annual: { total: annualTotal, used: nurseUsed.annual || 0, remaining: annualTotal - (nurseUsed.annual || 0) },
+              sick: { total: sickTotal, used: nurseUsed.sick || 0, remaining: sickTotal - (nurseUsed.sick || 0) },
+              personal: { total: personalTotal, used: nurseUsed.personal || 0, remaining: personalTotal - (nurseUsed.personal || 0) }
+            };
+          });
+
+          res.json(overview);
+        }
+      );
+    });
+  });
+});
+
+app.get('/api/departments/:id/leave-quota-config', (req, res) => {
+  const { id } = req.params;
+  const year = req.query.year || dayjs().year();
+  db.get('SELECT * FROM leave_quota_config WHERE department_id = ? AND year = ?', [id, String(year)], (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!row) {
+      return res.json({ department_id: parseInt(id), year: String(year), sick_days: 15, personal_days: 5 });
+    }
+    res.json(row);
+  });
+});
+
+app.put('/api/departments/:id/leave-quota-config', (req, res) => {
+  const { id } = req.params;
+  const { year, sick_days, personal_days } = req.body;
+  if (!year) return res.status(400).json({ error: '请提供年份' });
+
+  db.run(
+    `INSERT INTO leave_quota_config (department_id, year, sick_days, personal_days) VALUES (?, ?, ?, ?)
+     ON CONFLICT(department_id, year) DO UPDATE SET sick_days = excluded.sick_days, personal_days = excluded.personal_days`,
+    [id, String(year), sick_days || 15, personal_days || 5],
+    function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true, department_id: parseInt(id), year: String(year), sick_days: sick_days || 15, personal_days: personal_days || 5 });
+    }
+  );
+});
+
 app.get('/api/departments/:id/leave-requests', (req, res) => {
   const { id } = req.params;
   const { status, month } = req.query;
@@ -1130,6 +1280,7 @@ app.post('/api/leave-requests', (req, res) => {
   }
 
   const month = date.substring(0, 7);
+  const year = parseInt(date.substring(0, 4));
 
   db.get('SELECT * FROM leave_requests WHERE nurse_id = ? AND date = ? AND status != ?', [nurse_id, date, 'rejected'], (err, existing) => {
     if (err) {
@@ -1139,14 +1290,23 @@ app.post('/api/leave-requests', (req, res) => {
       return res.status(400).json({ error: '该日期已有请假申请' });
     }
 
-    db.run(`
-      INSERT INTO leave_requests (department_id, nurse_id, date, leave_type, status, month, reason)
-      VALUES (?, ?, ?, ?, 'pending', ?, ?)
-    `, [department_id, nurse_id, date, leave_type, month, reason || null], function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
+    getLeaveBalance(db, nurse_id, year).then(balance => {
+      const quota = balance[leave_type];
+      if (quota.remaining <= 0) {
+        return res.status(400).json({ error: `${LEAVE_TYPE_NAMES_CN[leave_type]}已用完（总额度${quota.total}天，已使用${quota.used}天）` });
       }
-      res.json({ id: this.lastID, success: true });
+
+      db.run(`
+        INSERT INTO leave_requests (department_id, nurse_id, date, leave_type, status, month, reason)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?)
+      `, [department_id, nurse_id, date, leave_type, month, reason || null], function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        res.json({ id: this.lastID, success: true });
+      });
+    }).catch(err => {
+      res.status(500).json({ error: err.message });
     });
   });
 });

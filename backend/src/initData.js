@@ -58,18 +58,18 @@ async function initDemoData() {
     const deptId = deptResult.lastID;
 
     const nurseData = [
-      { name: '张主任', level: 'senior' },
-      { name: '李护士长', level: 'senior' },
-      { name: '王护士', level: 'junior' },
-      { name: '赵护士', level: 'junior' },
-      { name: '陈护士', level: 'junior' },
-      { name: '刘护士', level: 'junior' }
+      { name: '张主任', level: 'senior', hire_date: '2010-03-15' },
+      { name: '李护士长', level: 'senior', hire_date: '2013-07-01' },
+      { name: '王护士', level: 'junior', hire_date: '2020-09-10' },
+      { name: '赵护士', level: 'junior', hire_date: '2022-04-20' },
+      { name: '陈护士', level: 'junior', hire_date: '2024-01-15' },
+      { name: '刘护士', level: 'junior', hire_date: '2025-06-01' }
     ];
 
     const nurseIds = [];
     for (const nurse of nurseData) {
-      const result = await runAsync('INSERT INTO nurses (name, department_id, level) VALUES (?, ?, ?)', [nurse.name, deptId, nurse.level]);
-      nurseIds.push({ id: result.lastID, name: nurse.name, level: nurse.level });
+      const result = await runAsync('INSERT INTO nurses (name, department_id, level, hire_date) VALUES (?, ?, ?, ?)', [nurse.name, deptId, nurse.level, nurse.hire_date]);
+      nurseIds.push({ id: result.lastID, name: nurse.name, level: nurse.level, hire_date: nurse.hire_date });
     }
 
     const unavailableDates = [
@@ -135,6 +135,8 @@ async function initDemoData() {
     ];
 
     await runAsync('INSERT OR REPLACE INTO training_config (department_id, year, annual_target_hours) VALUES (?, ?, ?)', [deptId, currentYear, 40]);
+
+    await runAsync('INSERT OR REPLACE INTO leave_quota_config (department_id, year, sick_days, personal_days) VALUES (?, ?, ?, ?)', [deptId, currentYear, 15, 5]);
 
     const courseIds = [];
     for (const course of courses) {

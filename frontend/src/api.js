@@ -138,4 +138,16 @@ export const updateShiftSkillRequirements = (deptId, requirements) =>
 export const getSkillCoverageReport = (deptId, month) =>
   api.get(`/departments/${deptId}/skill-coverage-report`, { params: { month } });
 
+export const getNurseLeaveBalance = (nurseId, year) =>
+  api.get(`/nurses/${nurseId}/leave-balance`, { params: { year } });
+
+export const getLeaveQuotaOverview = (deptId, year) =>
+  api.get(`/departments/${deptId}/leave-quota-overview`, { params: { year } });
+
+export const getLeaveQuotaConfig = (deptId, year) =>
+  api.get(`/departments/${deptId}/leave-quota-config`, { params: { year } });
+
+export const updateLeaveQuotaConfig = (deptId, data) =>
+  api.put(`/departments/${deptId}/leave-quota-config`, data);
+
 export default api;

@@ -16,8 +16,20 @@ db.serialize(() => {
     name TEXT NOT NULL,
     department_id INTEGER NOT NULL,
     level TEXT NOT NULL CHECK(level IN ('senior', 'junior')),
+    hire_date TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (department_id) REFERENCES departments(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS leave_quota_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    year TEXT NOT NULL,
+    sick_days INTEGER NOT NULL DEFAULT 15,
+    personal_days INTEGER NOT NULL DEFAULT 5,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(department_id, year)
   )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS unavailable_dates (
