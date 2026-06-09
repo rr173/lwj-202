@@ -59,6 +59,9 @@ function EventPage() {
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [approveModalVisible, setApproveModalVisible] = useState(false);
   const [rectificationModalVisible, setRectificationModalVisible] = useState(false);
+  const [reviewModalVisible, setReviewModalVisible] = useState(false);
+  const [reviewAction, setReviewAction] = useState(null);
+  const [reviewerId, setReviewerId] = useState(null);
 
   const [createForm] = Form.useForm();
   const [approveForm] = Form.useForm();
@@ -74,6 +77,15 @@ function EventPage() {
       loadStatistics();
       loadNurseStats();
     }
+  }, [selectedDept, filterStatus, filterType]);
+
+  useEffect(() => {
+    if (!selectedDept) return;
+    const timer = setInterval(() => {
+      loadEvents();
+      loadStatistics();
+    }, 60000);
+    return () => clearInterval(timer);
   }, [selectedDept, filterStatus, filterType]);
 
   useEffect(() => {
@@ -192,7 +204,7 @@ function EventPage() {
       await approveAdverseEvent(selectedEvent.id, {
         responsible_nurse_id: values.responsible_nurse_id,
         rectification_days: values.rectification_days,
-        operator_id: values.responsible_nurse_id
+        reviewer_id: values.reviewer_id
       });
       message.success('审核通过，事件已进入处理中');
       setApproveModalVisible(false);
@@ -223,11 +235,17 @@ function EventPage() {
   };
 
   const handleAccept = async () => {
+    if (!reviewerId) {
+      message.error('请选择验收人');
+      return;
+    }
     try {
       await acceptAdverseEvent(selectedEvent.id, {
-        operator_id: eventDetail.responsible_nurse_id
+        reviewer_id: reviewerId
       });
       message.success('验收通过，事件已关闭');
+      setReviewModalVisible(false);
+      setReviewerId(null);
       refreshAll();
     } catch (err) {
       message.error(`验收失败: ${err.response?.data?.error || err.message}`);
@@ -235,12 +253,18 @@ function EventPage() {
   };
 
   const handleReject = async () => {
+    if (!reviewerId) {
+      message.error('请选择验收人');
+      return;
+    }
     try {
       await rejectAdverseEvent(selectedEvent.id, {
-        operator_id: eventDetail.responsible_nurse_id,
+        reviewer_id: reviewerId,
         remark: '验收不通过，需重新整改'
       });
       message.warning('已退回处理中，整改期限已重置');
+      setReviewModalVisible(false);
+      setReviewerId(null);
       refreshAll();
     } catch (err) {
       message.error(`操作失败: ${err.response?.data?.error || err.message}`);
@@ -457,8 +481,8 @@ function EventPage() {
                   )}
                   {eventDetail.status === 'reviewing' && (
                     <>
-                      <Button type="primary" onClick={handleAccept}>验收通过</Button>
-                      <Button danger onClick={handleReject}>退回整改</Button>
+                      <Button type="primary" onClick={() => { setReviewAction('accept'); setReviewerId(null); setReviewModalVisible(true); }}>验收通过</Button>
+                      <Button danger onClick={() => { setReviewAction('reject'); setReviewerId(null); setReviewModalVisible(true); }}>退回整改</Button>
                     </>
                   )}
                 </Space>
@@ -648,6 +672,13 @@ function EventPage() {
         width={480}
       >
         <Form form={approveForm} layout="vertical">
+          <Form.Item name="reviewer_id" label="审核人" rules={[{ required: true, message: '请选择审核人' }]}>
+            <Select placeholder="请选择审核人(科室负责人)">
+              {nurses.filter(n => n.level === 'senior').map(n => (
+                <Option key={n.id} value={n.id}>{n.name} (资深)</Option>
+              ))}
+            </Select>
+          </Form.Item>
           <Form.Item name="responsible_nurse_id" label="责任人" rules={[{ required: true, message: '请指定责任人' }]}>
             <Select placeholder="请选择责任人">
               {nurses.map(n => (
@@ -682,6 +713,35 @@ function EventPage() {
             placeholder="请详细描述整改措施和执行情况"
             defaultValue=""
           />
+        </div>
+      </Modal>
+
+      <Modal
+        title={reviewAction === 'accept' ? '验收通过' : '退回整改'}
+        open={reviewModalVisible}
+        onOk={reviewAction === 'accept' ? handleAccept : handleReject}
+        onCancel={() => { setReviewModalVisible(false); setReviewerId(null); }}
+        width={420}
+        okText={reviewAction === 'accept' ? '确认通过' : '确认退回'}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>
+            事件: {EVENT_TYPE_MAP[eventDetail?.event_type]} | {eventDetail?.patient_bed} | 责任人: {eventDetail?.responsible_nurse_name}
+          </div>
+          <div style={{ marginBottom: 8, fontWeight: 500 }}>验收人</div>
+          <Select
+            style={{ width: '100%' }}
+            placeholder="请选择验收人(科室负责人)"
+            value={reviewerId}
+            onChange={setReviewerId}
+          >
+            {nurses.filter(n => n.level === 'senior').map(n => (
+              <Option key={n.id} value={n.id}>{n.name} (资深)</Option>
+            ))}
+          </Select>
+          <div style={{ fontSize: 12, color: '#999', marginTop: 8 }}>
+            验收人应与责任人不同，确保审核独立性
+          </div>
         </div>
       </Modal>
     </div>

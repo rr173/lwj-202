@@ -171,7 +171,6 @@ function initDemoData() {
 
                                 demoEvents.forEach((de, idx) => {
                                   const reporterId = nurseIds[de.reporterIdx].id;
-                                  const respNurseId = de.responsible_nurse_id !== null ? nurseIds[de.responsible_nurse_id].id : null;
                                   const actualRespId = de.status !== 'pending' ? nurseIds[1].id : null;
                                   const eventDate = de.event_time.substring(0, 10);
 

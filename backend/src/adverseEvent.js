@@ -3,6 +3,23 @@ const router = express.Router();
 const db = require('./db');
 const dayjs = require('dayjs');
 
+function refreshOverdue() {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `UPDATE adverse_events SET is_overdue = 1
+       WHERE status != 'closed'
+         AND rectification_deadline IS NOT NULL
+         AND date(rectification_deadline) < date('now')
+         AND is_overdue = 0`,
+      [],
+      function (err) {
+        if (err) return reject(err);
+        resolve(this.changes);
+      }
+    );
+  });
+}
+
 function checkOverdue(event) {
   if (event.status === 'closed') return event;
   if (event.rectification_deadline && dayjs().isAfter(dayjs(event.rectification_deadline))) {
@@ -24,8 +41,15 @@ function addTimeline(eventId, action, fromStatus, toStatus, operatorId, operator
   });
 }
 
-router.get('/adverse-events', (req, res) => {
+router.get('/adverse-events', async (req, res) => {
   const { department_id, status, event_type } = req.query;
+
+  try {
+    await refreshOverdue();
+  } catch (e) {
+    console.error('refreshOverdue failed:', e);
+  }
+
   let query = `
     SELECT ae.*, 
            r.name as reporter_name, r.level as reporter_level,
@@ -56,22 +80,19 @@ router.get('/adverse-events', (req, res) => {
 
   db.all(query, params, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    const events = rows.map(e => checkOverdue(e));
-    const overdueIds = events.filter(e => e.is_overdue === 1 && e.status !== 'closed').map(e => e.id);
-    if (overdueIds.length > 0) {
-      const placeholders = overdueIds.map(() => '?').join(',');
-      db.run(`UPDATE adverse_events SET is_overdue = 1 WHERE id IN (${placeholders}) AND status != 'closed'`, overdueIds, (uErr) => {
-        if (uErr) console.error('Failed to update overdue status:', uErr);
-        res.json(events);
-      });
-    } else {
-      res.json(events);
-    }
+    res.json(rows);
   });
 });
 
-router.get('/adverse-events/:id', (req, res) => {
+router.get('/adverse-events/:id', async (req, res) => {
   const { id } = req.params;
+
+  try {
+    await refreshOverdue();
+  } catch (e) {
+    console.error('refreshOverdue failed:', e);
+  }
+
   db.get(
     `SELECT ae.*, 
             r.name as reporter_name, r.level as reporter_level,
@@ -156,7 +177,7 @@ router.post('/adverse-events', (req, res) => {
 
 router.put('/adverse-events/:id/approve', (req, res) => {
   const { id } = req.params;
-  const { responsible_nurse_id, rectification_days, operator_id } = req.body;
+  const { responsible_nurse_id, rectification_days, reviewer_id } = req.body;
 
   if (!responsible_nurse_id || !rectification_days) {
     return res.status(400).json({ error: '请指定责任人和整改期限' });
@@ -171,9 +192,9 @@ router.put('/adverse-events/:id/approve', (req, res) => {
 
     const deadline = dayjs().add(rectification_days, 'day').format('YYYY-MM-DD');
 
-    db.get('SELECT * FROM nurses WHERE id = ?', [operator_id || responsible_nurse_id], (nErr, nurse) => {
+    db.get('SELECT * FROM nurses WHERE id = ?', [reviewer_id], (nErr, reviewer) => {
       if (nErr) return res.status(500).json({ error: nErr.message });
-      const operatorName = nurse ? nurse.name : '科室负责人';
+      const reviewerName = reviewer ? reviewer.name : '科室负责人';
 
       db.run(
         'UPDATE adverse_events SET status = ?, responsible_nurse_id = ?, rectification_days = ?, rectification_deadline = ? WHERE id = ?',
@@ -181,9 +202,14 @@ router.put('/adverse-events/:id/approve', (req, res) => {
         function (err2) {
           if (err2) return res.status(500).json({ error: err2.message });
 
-          addTimeline(id, '审核通过，进入处理中', 'pending', 'processing', operator_id || responsible_nurse_id, operatorName, `责任人: ${operatorName}, 整改期限: ${deadline}(${rectification_days}天)`)
-            .then(() => res.json({ success: true, rectification_deadline: deadline }))
-            .catch(tErr => res.status(500).json({ error: tErr.message }));
+          db.get('SELECT * FROM nurses WHERE id = ?', [responsible_nurse_id], (rErr, respNurse) => {
+            if (rErr) return res.status(500).json({ error: rErr.message });
+            const respName = respNurse ? respNurse.name : '未知';
+
+            addTimeline(id, '审核通过，进入处理中', 'pending', 'processing', reviewer_id, reviewerName, `责任人: ${respName}, 整改期限: ${deadline}(${rectification_days}天)`)
+              .then(() => res.json({ success: true, rectification_deadline: deadline }))
+              .catch(tErr => res.status(500).json({ error: tErr.message }));
+          });
         }
       );
     });
@@ -226,7 +252,7 @@ router.put('/adverse-events/:id/submit-rectification', (req, res) => {
 
 router.put('/adverse-events/:id/accept', (req, res) => {
   const { id } = req.params;
-  const { operator_id } = req.body;
+  const { reviewer_id } = req.body;
 
   db.get('SELECT * FROM adverse_events WHERE id = ?', [id], (err, event) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -235,9 +261,9 @@ router.put('/adverse-events/:id/accept', (req, res) => {
       return res.status(400).json({ error: '只有待验收事件可以验收' });
     }
 
-    db.get('SELECT * FROM nurses WHERE id = ?', [operator_id || event.reporter_id], (nErr, nurse) => {
+    db.get('SELECT * FROM nurses WHERE id = ?', [reviewer_id], (nErr, reviewer) => {
       if (nErr) return res.status(500).json({ error: nErr.message });
-      const operatorName = nurse ? nurse.name : '科室负责人';
+      const reviewerName = reviewer ? reviewer.name : '科室负责人';
 
       db.run(
         'UPDATE adverse_events SET status = ?, is_overdue = 0 WHERE id = ?',
@@ -245,7 +271,7 @@ router.put('/adverse-events/:id/accept', (req, res) => {
         function (err2) {
           if (err2) return res.status(500).json({ error: err2.message });
 
-          addTimeline(id, '验收通过，事件关闭', 'reviewing', 'closed', operator_id || event.reporter_id, operatorName, null)
+          addTimeline(id, '验收通过，事件关闭', 'reviewing', 'closed', reviewer_id, reviewerName, null)
             .then(() => res.json({ success: true }))
             .catch(tErr => res.status(500).json({ error: tErr.message }));
         }
@@ -256,7 +282,7 @@ router.put('/adverse-events/:id/accept', (req, res) => {
 
 router.put('/adverse-events/:id/reject', (req, res) => {
   const { id } = req.params;
-  const { operator_id, remark } = req.body;
+  const { reviewer_id, remark } = req.body;
 
   db.get('SELECT * FROM adverse_events WHERE id = ?', [id], (err, event) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -267,9 +293,9 @@ router.put('/adverse-events/:id/reject', (req, res) => {
 
     const newDeadline = dayjs().add(event.rectification_days, 'day').format('YYYY-MM-DD');
 
-    db.get('SELECT * FROM nurses WHERE id = ?', [operator_id || event.reporter_id], (nErr, nurse) => {
+    db.get('SELECT * FROM nurses WHERE id = ?', [reviewer_id], (nErr, reviewer) => {
       if (nErr) return res.status(500).json({ error: nErr.message });
-      const operatorName = nurse ? nurse.name : '科室负责人';
+      const reviewerName = reviewer ? reviewer.name : '科室负责人';
 
       db.run(
         'UPDATE adverse_events SET status = ?, rectification_deadline = ?, rectification_report = NULL, is_overdue = 0 WHERE id = ?',
@@ -277,7 +303,7 @@ router.put('/adverse-events/:id/reject', (req, res) => {
         function (err2) {
           if (err2) return res.status(500).json({ error: err2.message });
 
-          addTimeline(id, '验收不通过，退回处理中', 'reviewing', 'processing', operator_id || event.reporter_id, operatorName, remark || `整改期限重置为: ${newDeadline}(${event.rectification_days}天)`)
+          addTimeline(id, '验收不通过，退回处理中', 'reviewing', 'processing', reviewer_id, reviewerName, remark || `整改期限重置为: ${newDeadline}(${event.rectification_days}天)`)
             .then(() => res.json({ success: true, rectification_deadline: newDeadline }))
             .catch(tErr => res.status(500).json({ error: tErr.message }));
         }
@@ -286,8 +312,14 @@ router.put('/adverse-events/:id/reject', (req, res) => {
   });
 });
 
-router.get('/adverse-event-statistics/overview', (req, res) => {
+router.get('/adverse-event-statistics/overview', async (req, res) => {
   const { department_id, month, event_type } = req.query;
+
+  try {
+    await refreshOverdue();
+  } catch (e) {
+    console.error('refreshOverdue failed:', e);
+  }
 
   let where = 'WHERE 1=1';
   const params = [];
