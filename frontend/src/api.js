@@ -150,4 +150,22 @@ export const getLeaveQuotaConfig = (deptId, year) =>
 export const updateLeaveQuotaConfig = (deptId, data) =>
   api.put(`/departments/${deptId}/leave-quota-config`, data);
 
+export const getHandovers = (params) =>
+  api.get('/handovers', { params });
+
+export const getHandover = (id) =>
+  api.get(`/handovers/${id}`);
+
+export const createHandover = (data) =>
+  api.post('/handovers', data);
+
+export const signoffHandoverItem = (id, data) =>
+  api.put(`/handovers/${id}/signoff`, data);
+
+export const headNurseConfirmHandover = (id, data) =>
+  api.put(`/handovers/${id}/head-nurse-confirm`, data);
+
+export const getHandoverStatistics = (params) =>
+  api.get('/handover-statistics', { params });
+
 export default api;

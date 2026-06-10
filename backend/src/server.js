@@ -5,6 +5,7 @@ const db = require('./db');
 const { generateSchedule, validateScheduleChange, getDaysInMonth } = require('./scheduler');
 const trainingRouter = require('./training');
 const adverseEventRouter = require('./adverseEvent');
+const handoverRouter = require('./handover');
 
 const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
 const FATIGUE_THRESHOLD = 48;
@@ -445,6 +446,7 @@ app.get('/api/departments/:id/skill-coverage-report', (req, res) => {
 
 app.use('/api', trainingRouter);
 app.use('/api', adverseEventRouter);
+app.use('/api', handoverRouter);
 
 app.get('/api/departments', (req, res) => {
   db.all('SELECT * FROM departments ORDER BY id', [], (err, rows) => {

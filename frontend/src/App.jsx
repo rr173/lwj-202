@@ -3,6 +3,7 @@ import { Layout, Menu } from 'antd';
 import SchedulePage from './SchedulePage';
 import TrainingPage from './TrainingPage';
 import EventPage from './EventPage';
+import HandoverPage from './HandoverPage';
 
 const { Header } = Layout;
 
@@ -22,12 +23,13 @@ function App() {
             items={[
               { key: 'schedule', label: '排班管理' },
               { key: 'training', label: '培训管理' },
-              { key: 'event', label: '事件管理' }
+              { key: 'event', label: '事件管理' },
+              { key: 'handover', label: '交接班' }
             ]}
           />
         </div>
       </Header>
-      {currentModule === 'schedule' ? <SchedulePage /> : currentModule === 'training' ? <TrainingPage /> : <EventPage />}
+      {currentModule === 'schedule' ? <SchedulePage /> : currentModule === 'training' ? <TrainingPage /> : currentModule === 'event' ? <EventPage /> : <HandoverPage />}
     </Layout>
   );
 }

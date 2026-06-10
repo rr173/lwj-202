@@ -194,6 +194,48 @@ db.serialize(() => {
     UNIQUE(department_id, shift, skill_id)
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS shift_handovers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    from_nurse_id INTEGER NOT NULL,
+    to_nurse_id INTEGER NOT NULL,
+    handover_date TEXT NOT NULL,
+    shift_type TEXT NOT NULL CHECK(shift_type IN ('morning', 'afternoon', 'night')),
+    status TEXT NOT NULL DEFAULT 'pending_sign' CHECK(status IN ('pending_sign', 'pending_confirm', 'completed', 'disputed')),
+    from_nurse_signed_at TEXT,
+    to_nurse_signed_at TEXT,
+    head_nurse_id INTEGER,
+    head_nurse_remark TEXT,
+    head_nurse_confirmed_at TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (from_nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (to_nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (head_nurse_id) REFERENCES nurses(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS handover_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handover_id INTEGER NOT NULL,
+    item_type TEXT NOT NULL CHECK(item_type IN ('abnormal', 'key_patient', 'todo')),
+    description TEXT NOT NULL,
+    urgency INTEGER NOT NULL CHECK(urgency IN (1, 2, 3)),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (handover_id) REFERENCES shift_handovers(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS handover_signoffs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    result TEXT NOT NULL CHECK(result IN ('confirmed', 'questioned')),
+    remark TEXT,
+    signed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (item_id) REFERENCES handover_items(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    UNIQUE(item_id)
+  )`);
+
   db.run(`CREATE TABLE IF NOT EXISTS training_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     department_id INTEGER NOT NULL,
