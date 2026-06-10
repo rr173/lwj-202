@@ -3,6 +3,13 @@ const router = express.Router();
 const db = require('./db');
 const dayjs = require('dayjs');
 
+let writeMutex = Promise.resolve();
+function withWriteLock(fn) {
+  const result = writeMutex.then(() => fn());
+  writeMutex = result.catch(() => {});
+  return result;
+}
+
 function runAsync(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
@@ -243,27 +250,48 @@ router.post('/supplies/:id/receive', async (req, res) => {
   }
 });
 
+function canNurseRequisitionInDept(nurseId, departmentId, date) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const nurse = await getAsync('SELECT * FROM nurses WHERE id = ?', [nurseId]);
+      if (!nurse) return resolve({ allowed: false, reason: '护士不存在' });
+      if (nurse.department_id === parseInt(departmentId)) {
+        return resolve({ allowed: true, type: 'own' });
+      }
+      const refDate = date || dayjs().format('YYYY-MM-DD');
+      const secondment = await getAsync(
+        `SELECT * FROM secondment_requests
+         WHERE nurse_id = ? AND to_department_id = ? AND status = 'approved'
+           AND date(start_date) <= date(?) AND date(end_date) >= date(?)
+         LIMIT 1`,
+        [nurseId, departmentId, refDate, refDate]
+      );
+      if (secondment) {
+        return resolve({ allowed: true, type: 'secondment', secondment_id: secondment.id });
+      }
+      resolve({ allowed: false, reason: '该护士不属于本科室，也不在有效借调期内' });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 router.post('/departments/:id/requisitions', async (req, res) => {
   const { id } = req.params;
   const { supply_id, nurse_id, quantity, requisition_time, remark } = req.body;
   if (!supply_id || !nurse_id || !quantity || quantity <= 0) {
     return res.status(400).json({ error: '请填写完整的领用信息' });
   }
+
+  const actTime = requisition_time || dayjs().format('YYYY-MM-DD HH:mm:ss');
+  const date = actTime.substring(0, 10);
+
   try {
-    const supply = await getAsync(
-      `SELECT ms.*, COALESCE(SUM(CASE WHEN sb.is_expired = 0 THEN sb.remaining ELSE 0 END), 0) as available_stock
-       FROM medical_supplies ms
-       LEFT JOIN supply_batches sb ON sb.supply_id = ms.id AND sb.is_expired = 0
-       WHERE ms.id = ? AND ms.department_id = ?
-       GROUP BY ms.id`,
-      [supply_id, id]
-    );
-    if (!supply) return res.status(404).json({ error: '耗材不存在' });
-    if (supply.available_stock < quantity) {
-      return res.status(400).json({ error: `库存不足，可用库存仅 ${supply.available_stock} ${supply.unit}` });
+    const permission = await canNurseRequisitionInDept(nurse_id, id, date);
+    if (!permission.allowed) {
+      return res.status(403).json({ error: permission.reason || '无领用权限' });
     }
-    const actTime = requisition_time || dayjs().format('YYYY-MM-DD HH:mm:ss');
-    const date = actTime.substring(0, 10);
+
     const nurse = await getAsync('SELECT * FROM nurses WHERE id = ?', [nurse_id]);
     if (!nurse) return res.status(404).json({ error: '护士不存在' });
     const schedule = await getAsync(
@@ -273,75 +301,108 @@ router.post('/departments/:id/requisitions', async (req, res) => {
     const scheduleId = schedule ? schedule.id : null;
     const shift = schedule ? schedule.shift : null;
 
-    const batches = await allAsync(
-      `SELECT * FROM supply_batches
-       WHERE supply_id = ? AND is_expired = 0 AND remaining > 0
-       ORDER BY expiry_date ASC, received_at ASC`,
-      [supply_id]
-    );
+    const result = await withWriteLock(async () => {
+      const supply = await getAsync(
+        `SELECT ms.*, COALESCE(SUM(CASE WHEN sb.is_expired = 0 THEN sb.remaining ELSE 0 END), 0) as available_stock
+         FROM medical_supplies ms
+         LEFT JOIN supply_batches sb ON sb.supply_id = ms.id AND sb.is_expired = 0
+         WHERE ms.id = ? AND ms.department_id = ?
+         GROUP BY ms.id`,
+        [supply_id, id]
+      );
+      if (!supply) throw Object.assign(new Error('耗材不存在'), { statusCode: 404 });
+      if (supply.available_stock < quantity) {
+        throw Object.assign(new Error(`库存不足，可用库存仅 ${supply.available_stock} ${supply.unit}`), { statusCode: 400 });
+      }
 
-    let remainingNeeded = quantity;
-    const usedBatches = [];
-    for (const batch of batches) {
-      if (remainingNeeded <= 0) break;
-      const takeQty = Math.min(batch.remaining, remainingNeeded);
-      usedBatches.push({ batch_id: batch.id, quantity: takeQty });
-      remainingNeeded -= takeQty;
-    }
-    if (remainingNeeded > 0) {
-      return res.status(400).json({ error: '库存扣减失败' });
-    }
+      const batches = await allAsync(
+        `SELECT * FROM supply_batches
+         WHERE supply_id = ? AND is_expired = 0 AND remaining > 0
+         ORDER BY expiry_date ASC, received_at ASC`,
+        [supply_id]
+      );
 
-    db.serialize(() => {
-      db.run('BEGIN TRANSACTION', async (err) => {
-        if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
-        try {
-          const reqResult = await new Promise((resolve, reject) => {
-            db.run(
-              `INSERT INTO supply_requisitions (department_id, supply_id, nurse_id, quantity, requisition_time, schedule_id, shift, date, remark)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [id, supply_id, nurse_id, quantity, actTime, scheduleId, shift, date, remark || null],
-              function (e) {
-                if (e) reject(e);
-                else resolve({ lastID: this.lastID });
+      let remainingNeeded = quantity;
+      const usedBatches = [];
+      for (const batch of batches) {
+        if (remainingNeeded <= 0) break;
+        const takeQty = Math.min(batch.remaining, remainingNeeded);
+        usedBatches.push({ batch_id: batch.id, quantity: takeQty });
+        remainingNeeded -= takeQty;
+      }
+      if (remainingNeeded > 0) {
+        throw Object.assign(new Error('库存扣减失败'), { statusCode: 400 });
+      }
+
+      return await new Promise((resolve, reject) => {
+        db.serialize(() => {
+          db.run('BEGIN IMMEDIATE TRANSACTION', async (beginErr) => {
+            if (beginErr) {
+              reject(beginErr);
+              return;
+            }
+            try {
+              const reqResult = await new Promise((resolve, reject) => {
+                db.run(
+                  `INSERT INTO supply_requisitions (department_id, supply_id, nurse_id, quantity, requisition_time, schedule_id, shift, date, remark)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  [id, supply_id, nurse_id, quantity, actTime, scheduleId, shift, date, remark || null],
+                  function (e) {
+                    if (e) reject(e);
+                    else resolve({ lastID: this.lastID });
+                  }
+                );
+              });
+              const requisitionId = reqResult.lastID;
+
+              for (const ub of usedBatches) {
+                const updateResult = await new Promise((resolve, reject) => {
+                  db.run(
+                    'UPDATE supply_batches SET remaining = remaining - ? WHERE id = ? AND remaining >= ?',
+                    [ub.quantity, ub.batch_id, ub.quantity],
+                    function (e) {
+                      if (e) reject(e);
+                      else resolve({ changes: this.changes });
+                    }
+                  );
+                });
+                if (updateResult.changes === 0) {
+                  throw new Error('库存不足，扣减失败（可能有其他并发操作）');
+                }
+                await new Promise((resolve, reject) => {
+                  db.run(
+                    'INSERT INTO supply_requisition_items (requisition_id, batch_id, quantity) VALUES (?, ?, ?)',
+                    [requisitionId, ub.batch_id, ub.quantity],
+                    (e) => { if (e) reject(e); else resolve(); }
+                  );
+                });
               }
-            );
+
+              await new Promise((resolve, reject) => {
+                db.run('COMMIT', (e) => { if (e) reject(e); else resolve(); });
+              });
+
+              resolve({ id: requisitionId, shift });
+            } catch (txErr) {
+              db.run('ROLLBACK', () => reject(txErr));
+            }
           });
-          const requisitionId = reqResult.lastID;
-
-          for (const ub of usedBatches) {
-            await new Promise((resolve, reject) => {
-              db.run(
-                'INSERT INTO supply_requisition_items (requisition_id, batch_id, quantity) VALUES (?, ?, ?)',
-                [requisitionId, ub.batch_id, ub.quantity],
-                (e) => { if (e) reject(e); else resolve(); }
-              );
-            });
-            await new Promise((resolve, reject) => {
-              db.run(
-                'UPDATE supply_batches SET remaining = remaining - ? WHERE id = ?',
-                [ub.quantity, ub.batch_id],
-                (e) => { if (e) reject(e); else resolve(); }
-              );
-            });
-          }
-
-          await new Promise((resolve, reject) => {
-            db.run('COMMIT', (e) => { if (e) reject(e); else resolve(); });
-          });
-
-          await markExpiredBatches();
-          await checkAndCreateWarnings(parseInt(id));
-
-          res.json({ id: requisitionId, success: true, schedule_shift: shift });
-        } catch (txErr) {
-          db.run('ROLLBACK');
-          res.status(500).json({ error: txErr.message });
-        }
+        });
       });
     });
+
+    await markExpiredBatches();
+    await checkAndCreateWarnings(parseInt(id));
+
+    res.json({ id: result.id, success: true, schedule_shift: result.shift });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (err.statusCode) {
+      res.status(err.statusCode).json({ error: err.message });
+    } else if (err.message && err.message.includes('库存不足')) {
+      res.status(409).json({ error: err.message });
+    } else {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
