@@ -240,4 +240,43 @@ export const getAppealById = (id) =>
 export const handleAppeal = (id, data) =>
   api.put(`/assessment-appeals/${id}/handle`, data);
 
+export const getSupplies = (deptId) =>
+  api.get(`/departments/${deptId}/supplies`);
+
+export const createSupply = (deptId, data) =>
+  api.post(`/departments/${deptId}/supplies`, data);
+
+export const updateSupply = (id, data) =>
+  api.put(`/supplies/${id}`, data);
+
+export const deleteSupply = (id) =>
+  api.delete(`/supplies/${id}`);
+
+export const getSupplyBatches = (supplyId) =>
+  api.get(`/supplies/${supplyId}/batches`);
+
+export const receiveSupply = (supplyId, data) =>
+  api.post(`/supplies/${supplyId}/receive`, data);
+
+export const createRequisition = (deptId, data) =>
+  api.post(`/departments/${deptId}/requisitions`, data);
+
+export const getRequisitions = (deptId, params) =>
+  api.get(`/departments/${deptId}/requisitions`, { params });
+
+export const getSupplyFlow = (supplyId, limit) =>
+  api.get(`/supplies/${supplyId}/flow`, { params: { limit } });
+
+export const getSupplyTransactions = (deptId, supplyId, days) =>
+  api.get(`/departments/${deptId}/supplies/${supplyId}/transactions`, { params: { days } });
+
+export const getSupplyStockTrend = (deptId, supplyId, days) =>
+  api.get(`/departments/${deptId}/supplies/${supplyId}/stock-trend`, { params: { days } });
+
+export const getSupplyWarnings = (deptId) =>
+  api.get(`/departments/${deptId}/supply-warnings`);
+
+export const getSupplyMonthlyStatistics = (deptId, month) =>
+  api.get(`/departments/${deptId}/supply-monthly-statistics`, { params: { month } });
+
 export default api;

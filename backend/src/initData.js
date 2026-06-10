@@ -51,6 +51,14 @@ async function initDemoData() {
     await runAsync('DELETE FROM training_records');
     await runAsync('DELETE FROM training_courses');
     await runAsync('DELETE FROM training_config');
+    await runAsync('DELETE FROM handover_signoffs');
+    await runAsync('DELETE FROM handover_items');
+    await runAsync('DELETE FROM shift_handovers');
+    await runAsync('DELETE FROM supply_warnings');
+    await runAsync('DELETE FROM supply_requisition_items');
+    await runAsync('DELETE FROM supply_requisitions');
+    await runAsync('DELETE FROM supply_batches');
+    await runAsync('DELETE FROM medical_supplies');
     await runAsync('DELETE FROM nurses');
     await runAsync('DELETE FROM departments');
 
@@ -416,6 +424,131 @@ async function initDemoData() {
       }
     }
 
+    const supplyData = [
+      { name: '一次性注射器', spec: '5ml', unit: '支', safety_threshold: 50, category: 'injection' },
+      { name: '一次性注射器', spec: '10ml', unit: '支', safety_threshold: 30, category: 'injection' },
+      { name: '无菌纱布', spec: '8cm×8cm', unit: '包', safety_threshold: 80, category: 'dressing' },
+      { name: '医用棉签', spec: '10cm', unit: '包', safety_threshold: 100, category: 'dressing' },
+      { name: '一次性导尿管', spec: '16号', unit: '根', safety_threshold: 20, category: 'catheter' },
+      { name: '一次性胃管', spec: '18号', unit: '根', safety_threshold: 15, category: 'catheter' },
+      { name: '医用胶带', spec: '1.25cm×910cm', unit: '卷', safety_threshold: 40, category: 'dressing' },
+      { name: '一次性输液器', spec: '带针', unit: '套', safety_threshold: 60, category: 'infusion' },
+      { name: '医用口罩', spec: 'N95', unit: '个', safety_threshold: 200, category: 'protection' },
+      { name: '一次性手套', spec: 'M号', unit: '副', safety_threshold: 150, category: 'protection' }
+    ];
+    const supplyIds = [];
+    for (const s of supplyData) {
+      const result = await runAsync(
+        'INSERT INTO medical_supplies (department_id, name, spec, unit, safety_threshold, category) VALUES (?, ?, ?, ?, ?, ?)',
+        [deptId, s.name, s.spec, s.unit, s.safety_threshold, s.category]
+      );
+      supplyIds.push({ id: result.lastID, ...s });
+    }
+
+    const todayObj = dayjs();
+    const batchData = [
+      { supplyIdx: 0, batch_no: 'SYZ20260501', expiry: todayObj.add(8, 'month').format('YYYY-MM-DD'), qty: 120, received: todayObj.subtract(10, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 1 },
+      { supplyIdx: 0, batch_no: 'SYZ20260301', expiry: todayObj.add(3, 'month').format('YYYY-MM-DD'), qty: 40, received: todayObj.subtract(45, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 1 },
+      { supplyIdx: 1, batch_no: 'SYR20260401', expiry: todayObj.add(10, 'month').format('YYYY-MM-DD'), qty: 80, received: todayObj.subtract(20, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 1 },
+      { supplyIdx: 2, batch_no: 'SB20260101', expiry: todayObj.subtract(5, 'day').format('YYYY-MM-DD'), qty: 30, received: todayObj.subtract(90, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 1 },
+      { supplyIdx: 2, batch_no: 'SB20260501', expiry: todayObj.add(12, 'month').format('YYYY-MM-DD'), qty: 150, received: todayObj.subtract(5, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 1 },
+      { supplyIdx: 3, batch_no: 'MQ20260501', expiry: todayObj.add(18, 'month').format('YYYY-MM-DD'), qty: 300, received: todayObj.subtract(3, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 2 },
+      { supplyIdx: 4, batch_no: 'NG20260201', expiry: todayObj.add(2, 'month').format('YYYY-MM-DD'), qty: 25, received: todayObj.subtract(60, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 2 },
+      { supplyIdx: 5, batch_no: 'WG20260401', expiry: todayObj.add(9, 'month').format('YYYY-MM-DD'), qty: 45, received: todayObj.subtract(15, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 2 },
+      { supplyIdx: 6, batch_no: 'JD20260501', expiry: todayObj.add(24, 'month').format('YYYY-MM-DD'), qty: 90, received: todayObj.subtract(8, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 1 },
+      { supplyIdx: 7, batch_no: 'SYQ20260301', expiry: todayObj.add(4, 'month').format('YYYY-MM-DD'), qty: 50, received: todayObj.subtract(50, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 1 },
+      { supplyIdx: 8, batch_no: 'KZ20260501', expiry: todayObj.add(14, 'month').format('YYYY-MM-DD'), qty: 500, received: todayObj.subtract(2, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 2 },
+      { supplyIdx: 9, batch_no: 'ST20260401', expiry: todayObj.add(8, 'month').format('YYYY-MM-DD'), qty: 180, received: todayObj.subtract(25, 'day').format('YYYY-MM-DD HH:mm:ss'), op: 2 }
+    ];
+    const batchIds = [];
+    for (const b of batchData) {
+      const result = await runAsync(
+        'INSERT INTO supply_batches (supply_id, batch_no, expiry_date, quantity, remaining, received_at, operator_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [supplyIds[b.supplyIdx].id, b.batch_no, b.expiry, b.qty, b.qty, b.received, nurseIds[b.op - 1].id]
+      );
+      batchIds.push({ id: result.lastID, ...b });
+    }
+
+    const allSchedulesForSupplies = await allAsync('SELECT * FROM schedules ORDER BY date, shift');
+    const scheduleByDateNurse = {};
+    allSchedulesForSupplies.forEach(s => {
+      const key = `${s.date}_${s.nurse_id}`;
+      scheduleByDateNurse[key] = s;
+    });
+
+    const requisitionData = [];
+    for (let i = 0; i < 60; i++) {
+      const daysAgo = Math.floor(Math.random() * 20);
+      const reqDate = todayObj.subtract(daysAgo, 'day');
+      const reqDateStr = reqDate.format('YYYY-MM-DD');
+      const nurseIdx = 2 + Math.floor(Math.random() * 4);
+      const supplyIdx = Math.floor(Math.random() * supplyIds.length);
+      const qty = 1 + Math.floor(Math.random() * 10);
+      const schedKey = `${reqDateStr}_${nurseIds[nurseIdx].id}`;
+      const sched = scheduleByDateNurse[schedKey] || null;
+
+      requisitionData.push({
+        department_id: deptId,
+        supply_id: supplyIds[supplyIdx].id,
+        nurse_id: nurseIds[nurseIdx].id,
+        quantity: qty,
+        requisition_time: reqDate.hour(8 + Math.floor(Math.random() * 12)).minute(Math.floor(Math.random() * 60)).format('YYYY-MM-DD HH:mm:ss'),
+        schedule_id: sched ? sched.id : null,
+        shift: sched ? sched.shift : (['morning', 'afternoon', 'night'][Math.floor(Math.random() * 3)]),
+        date: reqDateStr,
+        remark: null
+      });
+    }
+
+    const batchRemaining = {};
+    batchIds.forEach(b => { batchRemaining[b.id] = b.qty; });
+
+    for (const req of requisitionData) {
+      const validBatches = batchIds
+        .filter(b => b.supplyIdx === supplyIds.findIndex(s => s.id === req.supply_id))
+        .map(b => ({
+          ...b,
+          is_expired: dayjs(b.expiry).isBefore(todayObj.format('YYYY-MM-DD')) ? 1 : 0
+        }))
+        .filter(b => !b.is_expired && batchRemaining[b.id] > 0)
+        .sort((a, b) => dayjs(a.expiry).valueOf() - dayjs(b.expiry).valueOf());
+
+      let needed = req.quantity;
+      const usedBatches = [];
+      for (const vb of validBatches) {
+        if (needed <= 0) break;
+        const take = Math.min(batchRemaining[vb.id], needed);
+        if (take > 0) {
+          usedBatches.push({ batch_id: vb.id, qty: take });
+          batchRemaining[vb.id] -= take;
+          needed -= take;
+        }
+      }
+      if (needed > 0) continue;
+
+      const reqResult = await runAsync(
+        'INSERT INTO supply_requisitions (department_id, supply_id, nurse_id, quantity, requisition_time, schedule_id, shift, date, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [req.department_id, req.supply_id, req.nurse_id, req.quantity, req.requisition_time, req.schedule_id, req.shift, req.date, req.remark]
+      );
+      for (const ub of usedBatches) {
+        await runAsync(
+          'INSERT INTO supply_requisition_items (requisition_id, batch_id, quantity) VALUES (?, ?, ?)',
+          [reqResult.lastID, ub.batch_id, ub.qty]
+        );
+        await runAsync(
+          'UPDATE supply_batches SET remaining = remaining - ? WHERE id = ?',
+          [ub.qty, ub.batch_id]
+        );
+      }
+    }
+
+    for (const bid of Object.keys(batchRemaining)) {
+      const batch = batchIds.find(b => b.id === parseInt(bid));
+      if (batch && dayjs(batch.expiry).isBefore(todayObj.format('YYYY-MM-DD'))) {
+        await runAsync('UPDATE supply_batches SET is_expired = 1 WHERE id = ?', [bid]);
+      }
+    }
+
     await runAsync('COMMIT');
 
     console.log('演示数据初始化成功!');
@@ -428,6 +561,9 @@ async function initDemoData() {
     console.log(`培训记录数: ${recordData.length}`);
     console.log(`不良事件数: ${demoEvents.length}`);
     console.log(`交接班记录数: ${demoHandoverData.length}`);
+    console.log(`耗材种类数: ${supplyData.length}`);
+    console.log(`耗材入库批次: ${batchData.length}`);
+    console.log(`耗材领用记录数: 约60条`);
   } catch (err) {
     console.error('初始化失败:', err);
     try { await runAsync('ROLLBACK'); } catch (e) { }

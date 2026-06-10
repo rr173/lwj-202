@@ -331,6 +331,77 @@ db.serialize(() => {
     FOREIGN KEY (nurse_id) REFERENCES nurses(id),
     FOREIGN KEY (handled_by) REFERENCES nurses(id)
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS medical_supplies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    spec TEXT,
+    unit TEXT NOT NULL DEFAULT '个',
+    safety_threshold INTEGER NOT NULL DEFAULT 10,
+    category TEXT DEFAULT 'general',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(department_id, name, spec)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS supply_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supply_id INTEGER NOT NULL,
+    batch_no TEXT NOT NULL,
+    expiry_date TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    remaining INTEGER NOT NULL,
+    received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    operator_id INTEGER,
+    is_expired INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (supply_id) REFERENCES medical_supplies(id),
+    FOREIGN KEY (operator_id) REFERENCES nurses(id),
+    UNIQUE(supply_id, batch_no)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS supply_requisitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    supply_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL,
+    requisition_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    schedule_id INTEGER,
+    shift TEXT,
+    date TEXT,
+    remark TEXT,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (supply_id) REFERENCES medical_supplies(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (schedule_id) REFERENCES schedules(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS supply_requisition_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    requisition_id INTEGER NOT NULL,
+    batch_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL,
+    FOREIGN KEY (requisition_id) REFERENCES supply_requisitions(id),
+    FOREIGN KEY (batch_id) REFERENCES supply_batches(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS supply_warnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    supply_id INTEGER NOT NULL,
+    warning_type TEXT NOT NULL CHECK(warning_type IN ('low_stock', 'expired', 'near_expiry')),
+    current_stock INTEGER,
+    threshold INTEGER,
+    expiry_date TEXT,
+    batch_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME,
+    is_resolved INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (supply_id) REFERENCES medical_supplies(id),
+    FOREIGN KEY (batch_id) REFERENCES supply_batches(id)
+  )`);
 });
 
 module.exports = db;

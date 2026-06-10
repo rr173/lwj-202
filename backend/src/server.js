@@ -8,6 +8,7 @@ const adverseEventRouter = require('./adverseEvent');
 const handoverRouter = require('./handover');
 const secondmentRouter = require('./secondment');
 const assessmentRouter = require('./assessment');
+const suppliesRouter = require('./supplies');
 
 const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
 const FATIGUE_THRESHOLD = 48;
@@ -451,6 +452,7 @@ app.use('/api', adverseEventRouter);
 app.use('/api', handoverRouter);
 app.use('/api', secondmentRouter);
 app.use('/api', assessmentRouter);
+app.use('/api', suppliesRouter);
 
 app.get('/api/departments', (req, res) => {
   db.all('SELECT * FROM departments ORDER BY id', [], (err, rows) => {

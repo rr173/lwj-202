@@ -5,6 +5,7 @@ import TrainingPage from './TrainingPage';
 import EventPage from './EventPage';
 import HandoverPage from './HandoverPage';
 import AssessmentPage from './AssessmentPage';
+import SuppliesPage from './SuppliesPage';
 
 const { Header } = Layout;
 
@@ -18,6 +19,7 @@ function App() {
       case 'event': return <EventPage />;
       case 'handover': return <HandoverPage />;
       case 'assessment': return <AssessmentPage />;
+      case 'supplies': return <SuppliesPage />;
       default: return <SchedulePage />;
     }
   };
@@ -37,7 +39,8 @@ function App() {
               { key: 'training', label: '培训管理' },
               { key: 'event', label: '事件管理' },
               { key: 'handover', label: '交接班' },
-              { key: 'assessment', label: '考核管理' }
+              { key: 'assessment', label: '考核管理' },
+              { key: 'supplies', label: '耗材管理' }
             ]}
           />
         </div>
