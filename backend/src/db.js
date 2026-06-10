@@ -305,6 +305,32 @@ db.serialize(() => {
     FOREIGN KEY (evaluator_id) REFERENCES nurses(id),
     UNIQUE(nurse_id, month)
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS assessment_appeals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessment_id INTEGER NOT NULL,
+    department_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    appeal_reason TEXT NOT NULL,
+    expected_dimension TEXT NOT NULL,
+    expected_score REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'maintained', 'adjusted')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    handled_at DATETIME,
+    handled_by INTEGER,
+    handle_result TEXT CHECK(handle_result IN ('maintain', 'adjust')),
+    handle_reason TEXT,
+    adjusted_attendance REAL,
+    adjusted_operation REAL,
+    adjusted_satisfaction REAL,
+    adjusted_teamwork REAL,
+    FOREIGN KEY (assessment_id) REFERENCES quality_assessments(id),
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (handled_by) REFERENCES nurses(id)
+  )`);
 });
 
 module.exports = db;

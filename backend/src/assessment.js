@@ -415,4 +415,303 @@ router.get('/quality-assessments/auto-info/:nurseId', async (req, res) => {
   }
 });
 
+function getAssessmentById(id) {
+  return new Promise((resolve, reject) => {
+    db.get('SELECT * FROM quality_assessments WHERE id = ?', [id], (err, row) => {
+      if (err) return reject(err);
+      resolve(row);
+    });
+  });
+}
+
+function getExistingAppeal(assessmentId) {
+  return new Promise((resolve, reject) => {
+    db.get('SELECT * FROM assessment_appeals WHERE assessment_id = ?', [assessmentId], (err, row) => {
+      if (err) return reject(err);
+      resolve(row);
+    });
+  });
+}
+
+function isAppealExpired(assessmentCreatedAt) {
+  const created = dayjs(assessmentCreatedAt);
+  const now = dayjs();
+  return now.diff(created, 'day') > 3;
+}
+
+function recalculateAndUpdateAssessment(assessmentId, newScores, weights) {
+  return new Promise((resolve, reject) => {
+    db.get('SELECT * FROM quality_assessments WHERE id = ?', [assessmentId], async (err, assessment) => {
+      if (err) return reject(err);
+      if (!assessment) return reject(new Error('考核记录不存在'));
+
+      try {
+        const [isFullAttendance, adverseEvents] = await Promise.all([
+          checkFullAttendance(assessment.nurse_id, assessment.department_id, assessment.month),
+          getAdverseEventsCount(assessment.nurse_id, assessment.department_id, assessment.month)
+        ]);
+
+        const rawScores = {
+          attendance: Number(newScores.attendance_score),
+          operation: Number(newScores.operation_score),
+          satisfaction: Number(newScores.satisfaction_score),
+          teamwork: Number(newScores.teamwork_score)
+        };
+
+        const { adjustments, finalScores } = computeAdjustments(rawScores, adverseEvents, isFullAttendance);
+        const weightedTotal = computeWeightedTotal(finalScores, weights);
+
+        db.run(
+          `UPDATE quality_assessments SET
+            attendance_score = ?, operation_score = ?, satisfaction_score = ?, teamwork_score = ?,
+            attendance_adjustment = ?, operation_adjustment = ?, satisfaction_adjustment = ?, teamwork_adjustment = ?,
+            final_attendance = ?, final_operation = ?, final_satisfaction = ?, final_teamwork = ?,
+            weighted_total = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            rawScores.attendance, rawScores.operation, rawScores.satisfaction, rawScores.teamwork,
+            adjustments.attendance, adjustments.operation, adjustments.satisfaction, adjustments.teamwork,
+            finalScores.attendance, finalScores.operation, finalScores.satisfaction, finalScores.teamwork,
+            weightedTotal, assessmentId
+          ],
+          function(err) {
+            if (err) return reject(err);
+            resolve({ weightedTotal, finalScores, adjustments });
+          }
+        );
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
+router.post('/quality-assessments/:id/appeal', async (req, res) => {
+  const { id } = req.params;
+  const { appeal_reason, expected_dimension, expected_score, nurse_id } = req.body;
+
+  if (!appeal_reason || !appeal_reason.trim()) {
+    return res.status(400).json({ error: '请填写申诉理由' });
+  }
+  if (!expected_dimension) {
+    return res.status(400).json({ error: '请选择期望调整的维度' });
+  }
+  if (expected_score === undefined || expected_score === null || isNaN(expected_score)) {
+    return res.status(400).json({ error: '请填写期望调整的分数' });
+  }
+  const numScore = Number(expected_score);
+  if (numScore < 1 || numScore > 10) {
+    return res.status(400).json({ error: '期望分数必须在1-10之间' });
+  }
+
+  try {
+    const assessment = await getAssessmentById(id);
+    if (!assessment) {
+      return res.status(404).json({ error: '考核记录不存在' });
+    }
+
+    if (nurse_id && assessment.nurse_id !== Number(nurse_id)) {
+      return res.status(403).json({ error: '只能对自己的考核记录发起申诉' });
+    }
+
+    if (isAppealExpired(assessment.created_at)) {
+      return res.status(400).json({ error: '申诉已过期，考核结果公布超过3天不能申诉' });
+    }
+
+    const existingAppeal = await getExistingAppeal(id);
+    if (existingAppeal) {
+      return res.status(400).json({ error: '该考核记录已申诉过，每条记录只能申诉一次' });
+    }
+
+    db.run(
+      `INSERT INTO assessment_appeals (
+        assessment_id, department_id, nurse_id, month,
+        appeal_reason, expected_dimension, expected_score, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [
+        assessment.id, assessment.department_id, assessment.nurse_id, assessment.month,
+        appeal_reason.trim(), expected_dimension, numScore
+      ],
+      function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true, id: this.lastID });
+      }
+    );
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/quality-assessments/:id/appeal-status', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const assessment = await getAssessmentById(id);
+    if (!assessment) {
+      return res.status(404).json({ error: '考核记录不存在' });
+    }
+
+    const existingAppeal = await getExistingAppeal(id);
+    const isExpired = isAppealExpired(assessment.created_at);
+
+    res.json({
+      can_appeal: !isExpired && !existingAppeal,
+      is_expired: isExpired,
+      has_appealed: !!existingAppeal,
+      appeal: existingAppeal || null,
+      appeal_expires_at: dayjs(assessment.created_at).add(3, 'day').format('YYYY-MM-DD HH:mm:ss')
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/assessment-appeals', (req, res) => {
+  const { department_id, month, status, nurse_id } = req.query;
+
+  if (!department_id) {
+    return res.status(400).json({ error: '请提供科室ID' });
+  }
+
+  let query = `
+    SELECT aa.*, 
+           n.name as nurse_name, n.level as nurse_level,
+           h.name as handler_name
+    FROM assessment_appeals aa
+    JOIN nurses n ON aa.nurse_id = n.id
+    LEFT JOIN nurses h ON aa.handled_by = h.id
+    WHERE aa.department_id = ?
+  `;
+  const params = [department_id];
+
+  if (month) {
+    query += ' AND aa.month = ?';
+    params.push(month);
+  }
+  if (status) {
+    query += ' AND aa.status = ?';
+    params.push(status);
+  }
+  if (nurse_id) {
+    query += ' AND aa.nurse_id = ?';
+    params.push(nurse_id);
+  }
+
+  query += ' ORDER BY aa.created_at DESC';
+
+  db.all(query, params, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+router.get('/assessment-appeals/:id', (req, res) => {
+  const { id } = req.params;
+  db.get(
+    `SELECT aa.*, 
+            n.name as nurse_name, n.level as nurse_level,
+            h.name as handler_name,
+            qa.attendance_score, qa.operation_score, qa.satisfaction_score, qa.teamwork_score,
+            qa.final_attendance, qa.final_operation, qa.final_satisfaction, qa.final_teamwork,
+            qa.weighted_total
+     FROM assessment_appeals aa
+     JOIN nurses n ON aa.nurse_id = n.id
+     LEFT JOIN nurses h ON aa.handled_by = h.id
+     JOIN quality_assessments qa ON aa.assessment_id = qa.id
+     WHERE aa.id = ?`,
+    [id],
+    (err, row) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!row) return res.status(404).json({ error: '申诉记录不存在' });
+      res.json(row);
+    }
+  );
+});
+
+router.put('/assessment-appeals/:id/handle', async (req, res) => {
+  const { id } = req.params;
+  const { handle_result, handle_reason, handled_by, scores } = req.body;
+
+  if (!handle_result || !['maintain', 'adjust'].includes(handle_result)) {
+    return res.status(400).json({ error: '请选择处理结果' });
+  }
+  if (!handle_reason || !handle_reason.trim()) {
+    return res.status(400).json({ error: '请填写处理理由' });
+  }
+
+  try {
+    const appeal = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM assessment_appeals WHERE id = ?', [id], (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+      });
+    });
+
+    if (!appeal) {
+      return res.status(404).json({ error: '申诉记录不存在' });
+    }
+    if (appeal.status !== 'pending') {
+      return res.status(400).json({ error: '该申诉已处理' });
+    }
+
+    let updateData = {
+      status: handle_result === 'maintain' ? 'maintained' : 'adjusted',
+      handle_result,
+      handle_reason: handle_reason.trim(),
+      handled_by,
+      handled_at: dayjs().format('YYYY-MM-DD HH:mm:ss')
+    };
+
+    let recalcResult = null;
+
+    if (handle_result === 'adjust') {
+      if (!scores) {
+        return res.status(400).json({ error: '调整分数时请提供新的分数' });
+      }
+      const scoreFields = ['attendance_score', 'operation_score', 'satisfaction_score', 'teamwork_score'];
+      for (const field of scoreFields) {
+        if (scores[field] === undefined || scores[field] === null || isNaN(scores[field])) {
+          return res.status(400).json({ error: '请为所有维度提供分数' });
+        }
+        const num = Number(scores[field]);
+        if (num < 1 || num > 10) {
+          return res.status(400).json({ error: '所有维度分数必须在1-10之间' });
+        }
+      }
+
+      const weights = await getWeightConfig(appeal.department_id);
+      recalcResult = await recalculateAndUpdateAssessment(appeal.assessment_id, scores, weights);
+
+      updateData.adjusted_attendance = scores.attendance_score;
+      updateData.adjusted_operation = scores.operation_score;
+      updateData.adjusted_satisfaction = scores.satisfaction_score;
+      updateData.adjusted_teamwork = scores.teamwork_score;
+    }
+
+    db.run(
+      `UPDATE assessment_appeals SET
+        status = ?, handle_result = ?, handle_reason = ?,
+        handled_by = ?, handled_at = ?, updated_at = CURRENT_TIMESTAMP,
+        adjusted_attendance = ?, adjusted_operation = ?, adjusted_satisfaction = ?, adjusted_teamwork = ?
+       WHERE id = ?`,
+      [
+        updateData.status, updateData.handle_result, updateData.handle_reason,
+        updateData.handled_by, updateData.handled_at,
+        updateData.adjusted_attendance || null, updateData.adjusted_operation || null,
+        updateData.adjusted_satisfaction || null, updateData.adjusted_teamwork || null,
+        id
+      ],
+      function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({
+          success: true,
+          recalculated: recalcResult || null
+        });
+      }
+    );
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

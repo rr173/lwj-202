@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   Layout, Select, DatePicker, Button, Modal, Form, InputNumber, Input,
   Table, List, Card, Tag, message, Space, Tooltip, Divider, Row, Col, Slider,
-  Statistic, Alert, Descriptions, Popconfirm
+  Statistic, Alert, Descriptions, Popconfirm, Radio
 } from 'antd';
 import { SettingOutlined, SaveOutlined, TrophyOutlined, LineChartOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
@@ -11,7 +11,8 @@ import {
   getDepartments, getAssessmentMonthPreview, createQualityAssessment,
   getAssessmentWeightConfig, updateAssessmentWeightConfig,
   getAssessmentRanking, getAssessmentTrend, getAssessmentAutoInfo,
-  getAssessmentHistory
+  getAssessmentHistory, getAppealStatus, createAppeal,
+  getAppeals, handleAppeal, getAppealById
 } from './api';
 
 const { Sider, Content } = Layout;
@@ -57,6 +58,17 @@ const DIMENSION_CN = {
 const LEVEL_CN = { senior: '高级护士', junior: '初级护士' };
 const LEVEL_COLOR = { senior: 'blue', junior: 'green' };
 
+const APPEAL_STATUS_CN = {
+  pending: '待处理',
+  maintained: '已维持',
+  adjusted: '已调整'
+};
+const APPEAL_STATUS_COLOR = {
+  pending: 'orange',
+  maintained: 'default',
+  adjusted: 'green'
+};
+
 function AssessmentPage() {
   const [departments, setDepartments] = useState([]);
   const [selectedDept, setSelectedDept] = useState(null);
@@ -71,9 +83,21 @@ function AssessmentPage() {
 
   const [weightModalVisible, setWeightModalVisible] = useState(false);
   const [historyModalVisible, setHistoryModalVisible] = useState(false);
+  const [appealModalVisible, setAppealModalVisible] = useState(false);
+  const [appealListVisible, setAppealListVisible] = useState(false);
+  const [appealHandleModalVisible, setAppealHandleModalVisible] = useState(false);
+  const [appealStatus, setAppealStatus] = useState(null);
+  const [appealList, setAppealList] = useState([]);
+  const [currentAppeal, setCurrentAppeal] = useState(null);
   const [scoreForm] = Form.useForm();
   const [weightForm] = Form.useForm();
+  const [appealForm] = Form.useForm();
+  const [appealHandleForm] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
+  const [submittingAppeal, setSubmittingAppeal] = useState(false);
+  const [handlingAppeal, setHandlingAppeal] = useState(false);
+  const [currentView, setCurrentView] = useState('assessment');
+  const [selectedAssessmentForAppeal, setSelectedAssessmentForAppeal] = useState(null);
 
   useEffect(() => {
     loadDepartments();
@@ -183,6 +207,8 @@ function AssessmentPage() {
           teamwork_score: record.teamwork_score,
           remark: record.remark
         });
+        setSelectedAssessmentForAppeal(record);
+        loadAppealStatus(record.id);
       } else {
         scoreForm.resetFields();
         scoreForm.setFieldsValue({
@@ -191,9 +217,118 @@ function AssessmentPage() {
           satisfaction_score: 8,
           teamwork_score: 8
         });
+        setSelectedAssessmentForAppeal(null);
+        setAppealStatus(null);
       }
     } catch (err) {
       scoreForm.resetFields();
+      setSelectedAssessmentForAppeal(null);
+      setAppealStatus(null);
+    }
+  };
+
+  const loadAppealStatus = async (assessmentId) => {
+    try {
+      const res = await getAppealStatus(assessmentId);
+      setAppealStatus(res.data);
+    } catch (err) {
+      setAppealStatus(null);
+    }
+  };
+
+  const loadAppealList = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getAppeals({
+        department_id: selectedDept.id,
+        month: selectedMonth
+      });
+      setAppealList(res.data);
+    } catch (err) {
+      message.error('加载申诉列表失败');
+    }
+  };
+
+  const loadPendingAppeals = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getAppeals({
+        department_id: selectedDept.id,
+        status: 'pending'
+      });
+      setAppealList(res.data);
+    } catch (err) {
+      message.error('加载待处理申诉失败');
+    }
+  };
+
+  const openAppealModal = () => {
+    if (!appealStatus?.can_appeal) return;
+    appealForm.resetFields();
+    setAppealModalVisible(true);
+  };
+
+  const handleAppealSubmit = async () => {
+    if (!selectedAssessmentForAppeal) return;
+    try {
+      const values = await appealForm.validateFields();
+      setSubmittingAppeal(true);
+      await createAppeal(selectedAssessmentForAppeal.id, {
+        ...values,
+        nurse_id: selectedNurse.nurse_id
+      });
+      message.success('申诉提交成功');
+      setAppealModalVisible(false);
+      loadAppealStatus(selectedAssessmentForAppeal.id);
+      loadAppealList();
+    } catch (err) {
+      if (err.errorFields) return;
+      message.error(err.response?.data?.error || '提交失败');
+    } finally {
+      setSubmittingAppeal(false);
+    }
+  };
+
+  const openAppealHandleModal = async (appeal) => {
+    setCurrentAppeal(appeal);
+    const detail = await getAppealById(appeal.id);
+    appealHandleForm.resetFields();
+    appealHandleForm.setFieldsValue({
+      attendance_score: detail.data.attendance_score,
+      operation_score: detail.data.operation_score,
+      satisfaction_score: detail.data.satisfaction_score,
+      teamwork_score: detail.data.teamwork_score
+    });
+    setAppealHandleModalVisible(true);
+  };
+
+  const handleAppealProcess = async () => {
+    if (!currentAppeal) return;
+    try {
+      const values = await appealHandleForm.validateFields();
+      setHandlingAppeal(true);
+      await handleAppeal(currentAppeal.id, {
+        handle_result: values.handle_result,
+        handle_reason: values.handle_reason,
+        handled_by: 1,
+        scores: values.handle_result === 'adjust' ? {
+          attendance_score: values.attendance_score,
+          operation_score: values.operation_score,
+          satisfaction_score: values.satisfaction_score,
+          teamwork_score: values.teamwork_score
+        } : undefined
+      });
+      message.success('处理成功');
+      setAppealHandleModalVisible(false);
+      loadAppealList();
+      loadPendingAppeals();
+      loadRanking();
+      loadNurseList();
+    } catch (err) {
+      if (err.errorFields) return;
+      message.error(err.response?.data?.error || '处理失败');
+    } finally {
+      setHandlingAppeal(false);
     }
   };
 
@@ -530,6 +665,28 @@ function AssessmentPage() {
           />
         </Space>
         <Space style={{ marginLeft: 'auto' }}>
+          <Button.Group>
+            <Button
+              type={currentView === 'assessment' ? 'primary' : 'default'}
+              onClick={() => setCurrentView('assessment')}
+            >
+              考核管理
+            </Button>
+            <Button
+              type={currentView === 'appeal' ? 'primary' : 'default'}
+              onClick={() => {
+                setCurrentView('appeal');
+                loadPendingAppeals();
+              }}
+            >
+              申诉处理
+              {appealList.filter(a => a.status === 'pending').length > 0 && (
+                <Tag color="red" style={{ marginLeft: 4 }}>
+                  {appealList.filter(a => a.status === 'pending').length}
+                </Tag>
+              )}
+            </Button>
+          </Button.Group>
           <Button
             icon={<SettingOutlined />}
             onClick={openWeightModal}
@@ -586,7 +743,70 @@ function AssessmentPage() {
         </Sider>
 
         <Layout style={{ padding: 16, overflow: 'auto' }}>
-          {selectedNurse ? (
+          {currentView === 'appeal' ? (
+            <div style={{ width: '100%' }}>
+              <Card
+                title={
+                  <Space>
+                    <span>申诉处理</span>
+                    <Select
+                      defaultValue="pending"
+                      style={{ width: 120 }}
+                      onChange={(val) => {
+                        if (val === 'pending') {
+                          loadPendingAppeals();
+                        } else if (val === 'all') {
+                          loadAppealList();
+                        } else {
+                          getAppeals({
+                            department_id: selectedDept.id,
+                            status: val
+                          }).then(res => setAppealList(res.data));
+                        }
+                      }}
+                    >
+                      <Option value="pending">待处理</Option>
+                      <Option value="maintained">已维持</Option>
+                      <Option value="adjusted">已调整</Option>
+                      <Option value="all">全部</Option>
+                    </Select>
+                  </Space>
+                }
+                size="small"
+              >
+                <Table
+                  dataSource={appealList}
+                  rowKey="id"
+                  size="small"
+                  columns={[
+                    { title: '护士姓名', dataIndex: 'nurse_name', width: 100 },
+                    { title: '职级', dataIndex: 'nurse_level', width: 90, render: v => <Tag color={LEVEL_COLOR[v]}>{LEVEL_CN[v]}</Tag> },
+                    { title: '考核月份', dataIndex: 'month', width: 100 },
+                    { title: '申诉理由', dataIndex: 'appeal_reason', ellipsis: true },
+                    { title: '期望调整维度', dataIndex: 'expected_dimension', width: 120, render: v => DIMENSION_CN[v] || v },
+                    { title: '期望分数', dataIndex: 'expected_score', width: 90, render: v => v?.toFixed(1) },
+                    { title: '状态', dataIndex: 'status', width: 100, render: v => <Tag color={APPEAL_STATUS_COLOR[v]}>{APPEAL_STATUS_CN[v]}</Tag> },
+                    { title: '申诉时间', dataIndex: 'created_at', width: 160 },
+                    {
+                      title: '操作',
+                      width: 100,
+                      render: (_, record) => (
+                        record.status === 'pending' ? (
+                          <Button type="primary" size="small" onClick={() => openAppealHandleModal(record)}>
+                            处理
+                          </Button>
+                        ) : (
+                          <Button size="small" onClick={() => openAppealHandleModal(record)}>
+                            查看
+                          </Button>
+                        )
+                      )
+                    }
+                  ]}
+                />
+              </Card>
+            </div>
+          ) : selectedNurse ? (
             <Row gutter={16}>
               <Col xs={24} lg={12}>
                 <Card
@@ -739,7 +959,38 @@ function AssessmentPage() {
                 </Card>
 
                 {selectedNurse && preview && (
-                  <Card title="本月考核详情预览" size="small">
+                  <Card
+                    title={
+                      <Space>
+                        <span>本月考核详情预览</span>
+                        {selectedAssessmentForAppeal && appealStatus && (
+                          <Tooltip title={
+                            appealStatus.is_expired
+                              ? `申诉已过期（截止：${appealStatus.appeal_expires_at}）`
+                              : appealStatus.has_appealed
+                                ? `已申诉，状态：${APPEAL_STATUS_CN[appealStatus.appeal.status]}`
+                                : `对考核结果有异议？点击申诉（截止：${appealStatus.appeal_expires_at}）`
+                          }>
+                            <Button
+                              type="primary"
+                              danger
+                              size="small"
+                              disabled={!appealStatus.can_appeal}
+                              onClick={openAppealModal}
+                            >
+                              {appealStatus.is_expired ? '申诉已过期' : appealStatus.has_appealed ? '已申诉' : '申诉'}
+                            </Button>
+                          </Tooltip>
+                        )}
+                        {appealStatus?.appeal && (
+                          <Tag color={APPEAL_STATUS_COLOR[appealStatus.appeal.status]}>
+                            {APPEAL_STATUS_CN[appealStatus.appeal.status]}
+                          </Tag>
+                        )}
+                      </Space>
+                    }
+                    size="small"
+                  >
                     <Descriptions column={1} size="small" bordered>
                       <Descriptions.Item label="护士姓名">{selectedNurse.nurse_name}</Descriptions.Item>
                       <Descriptions.Item label="考核月份">{selectedMonth}</Descriptions.Item>
@@ -859,6 +1110,218 @@ function AssessmentPage() {
           size="small"
           pagination={{ pageSize: 10 }}
         />
+      </Modal>
+
+      <Modal
+        title="提交考核申诉"
+        open={appealModalVisible}
+        onOk={handleAppealSubmit}
+        onCancel={() => setAppealModalVisible(false)}
+        confirmLoading={submittingAppeal}
+        width={500}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          message="温馨提示"
+          description="每条考核记录只能申诉一次，请认真填写申诉理由和期望调整的内容。"
+          style={{ marginBottom: 16 }}
+        />
+        <Form form={appealForm} layout="vertical">
+          <Form.Item
+            label="期望调整的维度"
+            name="expected_dimension"
+            rules={[{ required: true, message: '请选择期望调整的维度' }]}
+          >
+            <Select placeholder="请选择维度">
+              {DIMENSION_CONFIG.map(dim => (
+                <Option key={dim.key} value={dim.key}>{dim.label}</Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item
+            label="期望调整分数"
+            name="expected_score"
+            rules={[
+              { required: true, message: '请填写期望分数' },
+              { type: 'number', min: 1, max: 10, message: '分数范围1-10' }
+            ]}
+          >
+            <InputNumber
+              style={{ width: '100%' }}
+              min={1}
+              max={10}
+              step={0.5}
+              placeholder="请输入期望分数（1-10）"
+            />
+          </Form.Item>
+          <Form.Item
+            label="申诉理由"
+            name="appeal_reason"
+            rules={[{ required: true, message: '请填写申诉理由' }]}
+          >
+            <TextArea
+              rows={4}
+              placeholder="请详细说明申诉理由，包括认为评分不公的原因和依据..."
+              showCount
+              maxLength={500}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={currentAppeal?.status === 'pending' ? '处理考核申诉' : '申诉详情'}
+        open={appealHandleModalVisible}
+        onOk={currentAppeal?.status === 'pending' ? handleAppealProcess : undefined}
+        onCancel={() => setAppealHandleModalVisible(false)}
+        confirmLoading={handlingAppeal}
+        footer={currentAppeal?.status === 'pending' ? undefined : null}
+        width={700}
+      >
+        {currentAppeal && (
+          <div>
+            <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="护士姓名">{currentAppeal.nurse_name}</Descriptions.Item>
+              <Descriptions.Item label="考核月份">{currentAppeal.month}</Descriptions.Item>
+              <Descriptions.Item label="期望调整维度" span={2}>
+                {DIMENSION_CN[currentAppeal.expected_dimension]}
+              </Descriptions.Item>
+              <Descriptions.Item label="期望分数">{currentAppeal.expected_score?.toFixed(1)}</Descriptions.Item>
+              <Descriptions.Item label="申诉时间">{currentAppeal.created_at}</Descriptions.Item>
+              <Descriptions.Item label="申诉理由" span={2}>
+                {currentAppeal.appeal_reason}
+              </Descriptions.Item>
+              {currentAppeal.status !== 'pending' && (
+                <>
+                  <Descriptions.Item label="处理结果" span={2}>
+                    <Tag color={APPEAL_STATUS_COLOR[currentAppeal.status]}>
+                      {APPEAL_STATUS_CN[currentAppeal.status]}
+                    </Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="处理人">{currentAppeal.handler_name}</Descriptions.Item>
+                  <Descriptions.Item label="处理时间">{currentAppeal.handled_at}</Descriptions.Item>
+                  <Descriptions.Item label="处理理由" span={2}>
+                    {currentAppeal.handle_reason}
+                  </Descriptions.Item>
+                </>
+              )}
+            </Descriptions>
+
+            {currentAppeal.status === 'pending' && (
+              <Form form={appealHandleForm} layout="vertical">
+                <Divider orientation="left">当前分数</Divider>
+                <Row gutter={16} style={{ marginBottom: 16 }}>
+                  {DIMENSION_CONFIG.map(dim => (
+                    <Col span={6} key={dim.key}>
+                      <Statistic
+                        title={dim.label}
+                        value={currentAppeal[`${dim.key}_score`] || 0}
+                        precision={1}
+                        valueStyle={{ fontSize: 16, color: dim.color }}
+                      />
+                    </Col>
+                  ))}
+                </Row>
+
+                <Form.Item
+                  label="处理结果"
+                  name="handle_result"
+                  rules={[{ required: true, message: '请选择处理结果' }]}
+                >
+                  <Radio.Group>
+                    <Radio value="maintain">维持原分</Radio>
+                    <Radio value="adjust">调整分数</Radio>
+                  </Radio.Group>
+                </Form.Item>
+
+                <Form.Item shouldUpdate noStyle>
+                  {({ getFieldValue }) =>
+                    getFieldValue('handle_result') === 'adjust' && (
+                      <>
+                        <Divider orientation="left">调整分数</Divider>
+                        <Row gutter={16} style={{ marginBottom: 16 }}>
+                          {DIMENSION_CONFIG.map(dim => (
+                            <Col span={6} key={dim.key}>
+                              <Form.Item
+                                label={dim.label}
+                                name={`${dim.key}_score`}
+                                rules={[
+                                  { required: true, message: '请输入分数' },
+                                  { type: 'number', min: 1, max: 10, message: '分数范围1-10' }
+                                ]}
+                              >
+                                <InputNumber
+                                  style={{ width: '100%' }}
+                                  min={1}
+                                  max={10}
+                                  step={0.5}
+                                />
+                              </Form.Item>
+                            </Col>
+                          ))}
+                        </Row>
+                      </>
+                    )
+                  }
+                </Form.Item>
+
+                <Form.Item
+                  label="处理理由"
+                  name="handle_reason"
+                  rules={[{ required: true, message: '请填写处理理由' }]}
+                >
+                  <TextArea
+                    rows={3}
+                    placeholder="请填写处理理由..."
+                    showCount
+                    maxLength={500}
+                  />
+                </Form.Item>
+              </Form>
+            )}
+
+            {currentAppeal.status === 'adjusted' && currentAppeal.adjusted_attendance !== null && (
+              <>
+                <Divider orientation="left">调整后的分数</Divider>
+                <Row gutter={16}>
+                  <Col span={6}>
+                    <Statistic
+                      title="出勤纪律"
+                      value={currentAppeal.adjusted_attendance}
+                      precision={1}
+                      valueStyle={{ fontSize: 16, color: '#1890ff' }}
+                    />
+                  </Col>
+                  <Col span={6}>
+                    <Statistic
+                      title="护理操作规范"
+                      value={currentAppeal.adjusted_operation}
+                      precision={1}
+                      valueStyle={{ fontSize: 16, color: '#52c41a' }}
+                    />
+                  </Col>
+                  <Col span={6}>
+                    <Statistic
+                      title="患者满意度"
+                      value={currentAppeal.adjusted_satisfaction}
+                      precision={1}
+                      valueStyle={{ fontSize: 16, color: '#faad14' }}
+                    />
+                  </Col>
+                  <Col span={6}>
+                    <Statistic
+                      title="团队协作"
+                      value={currentAppeal.adjusted_teamwork}
+                      precision={1}
+                      valueStyle={{ fontSize: 16, color: '#722ed1' }}
+                    />
+                  </Col>
+                </Row>
+              </>
+            )}
+          </div>
+        )}
       </Modal>
     </Layout>
   );

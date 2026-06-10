@@ -225,4 +225,19 @@ export const deleteAssessment = (id) =>
 export const getAssessmentAutoInfo = (nurseId, params) =>
   api.get(`/quality-assessments/auto-info/${nurseId}`, { params });
 
+export const createAppeal = (assessmentId, data) =>
+  api.post(`/quality-assessments/${assessmentId}/appeal`, data);
+
+export const getAppealStatus = (assessmentId) =>
+  api.get(`/quality-assessments/${assessmentId}/appeal-status`);
+
+export const getAppeals = (params) =>
+  api.get('/assessment-appeals', { params });
+
+export const getAppealById = (id) =>
+  api.get(`/assessment-appeals/${id}`);
+
+export const handleAppeal = (id, data) =>
+  api.put(`/assessment-appeals/${id}/handle`, data);
+
 export default api;
