@@ -65,10 +65,10 @@ function getAdverseEventsCount(nurseId, departmentId, month) {
     db.all(
       `SELECT ae.event_type, ae.id
        FROM adverse_events ae
-       WHERE (ae.responsible_nurse_id = ? OR ae.reporter_id = ?)
+       WHERE ae.responsible_nurse_id = ?
          AND ae.department_id = ?
          AND ae.event_time >= ? AND ae.event_time <= ?`,
-      [nurseId, nurseId, departmentId, `${monthStart} 00:00:00`, `${monthEnd} 23:59:59`],
+      [nurseId, departmentId, `${monthStart} 00:00:00`, `${monthEnd} 23:59:59`],
       (err, rows) => {
         if (err) return reject(err);
         resolve(rows);
@@ -200,8 +200,8 @@ router.post('/quality-assessments', async (req, res) => {
         attendance_score, operation_score, satisfaction_score, teamwork_score,
         attendance_adjustment, operation_adjustment, satisfaction_adjustment, teamwork_adjustment,
         final_attendance, final_operation, final_satisfaction, final_teamwork,
-        weighted_total, adverse_event_count, is_full_attendance, remark, evaluator_id, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        weighted_total, adverse_event_count, is_full_attendance, remark, evaluator_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(nurse_id, month) DO UPDATE SET
         attendance_score = excluded.attendance_score,
         operation_score = excluded.operation_score,
@@ -407,7 +407,8 @@ router.get('/quality-assessments/auto-info/:nurseId', async (req, res) => {
         event_type: e.event_type,
         affected_dimension: EVENT_TYPE_TO_DIMENSION[e.event_type] || 'operation'
       })),
-      adverse_event_count: adverseEvents.length
+      adverse_event_count: adverseEvents.length,
+      note: '仅统计该护士作为责任人的不良事件'
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
