@@ -44,15 +44,18 @@ function getDaysBetween(start, end) {
   return days;
 }
 
-async function checkScheduleConflicts(nurseId, startDate, endDate) {
+async function checkScheduleConflicts(nurseId, startDate, endDate, shifts) {
   const conflicts = [];
   const days = getDaysBetween(startDate, endDate);
   if (days.length === 0) return conflicts;
 
-  const placeholders = days.map(() => '?').join(',');
+  const shiftsToCheck = (!shifts || shifts === 'all') ? SHIFTS : shifts.split(',');
+  const datePlaceholders = days.map(() => '?').join(',');
+  const shiftPlaceholders = shiftsToCheck.map(() => '?').join(',');
+
   const schedules = await queryAsync(
-    `SELECT * FROM schedules WHERE nurse_id = ? AND date IN (${placeholders})`,
-    [nurseId, ...days]
+    `SELECT * FROM schedules WHERE nurse_id = ? AND date IN (${datePlaceholders}) AND shift IN (${shiftPlaceholders})`,
+    [nurseId, ...days, ...shiftsToCheck]
   );
 
   schedules.forEach(s => {
@@ -107,7 +110,9 @@ router.post('/secondment-requests', async (req, res) => {
       return res.status(400).json({ error: `该护士在${overlappingSecondment[0].start_date}至${overlappingSecondment[0].end_date}期间已有生效的借调` });
     }
 
-    const conflicts = await checkScheduleConflicts(nurse_id, start_date, end_date);
+    const shiftsStr = shifts || 'all';
+
+    const conflicts = await checkScheduleConflicts(nurse_id, start_date, end_date, shiftsStr);
     const originalDeptConflicts = conflicts.filter(c => c.department_id === from_department_id);
 
     if (originalDeptConflicts.length > 0) {
@@ -222,7 +227,7 @@ router.put('/secondment-requests/:id/approve', async (req, res) => {
       return res.status(400).json({ error: '该申请已处理' });
     }
 
-    const conflicts = await checkScheduleConflicts(request.nurse_id, request.start_date, request.end_date);
+    const conflicts = await checkScheduleConflicts(request.nurse_id, request.start_date, request.end_date, request.shifts);
     const originalDeptConflicts = conflicts.filter(c => c.department_id === request.from_department_id);
 
     if (originalDeptConflicts.length > 0) {
@@ -240,16 +245,17 @@ router.put('/secondment-requests/:id/approve', async (req, res) => {
     }
 
     const days = getDaysBetween(request.start_date, request.end_date);
-    const shiftsToApply = request.shifts === 'all' ? SHIFTS : request.shifts.split(',');
+    const shiftsToDelete = request.shifts === 'all' ? SHIFTS : request.shifts.split(',');
 
     await runAsync('BEGIN TRANSACTION');
     try {
       if (originalDeptConflicts.length === 0) {
         const datePlaceholders = days.map(() => '?').join(',');
         if (days.length > 0) {
+          const shiftPlaceholders = shiftsToDelete.map(() => '?').join(',');
           await runAsync(
-            `DELETE FROM schedules WHERE nurse_id = ? AND department_id = ? AND date IN (${datePlaceholders})`,
-            [request.nurse_id, request.from_department_id, ...days]
+            `DELETE FROM schedules WHERE nurse_id = ? AND department_id = ? AND date IN (${datePlaceholders}) AND shift IN (${shiftPlaceholders})`,
+            [request.nurse_id, request.from_department_id, ...days, ...shiftsToDelete]
           );
         }
       }

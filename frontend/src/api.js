@@ -7,7 +7,7 @@ const api = axios.create({
 export const getDepartments = () => api.get('/departments');
 export const createDepartment = (name) => api.post('/departments', { name });
 
-export const getNurses = (deptId) => api.get(`/departments/${deptId}/nurses`);
+export const getNurses = (deptId, month) => api.get(`/departments/${deptId}/nurses`, { params: month ? { month } : {} });
 export const createNurse = (data) => api.post('/nurses', data);
 
 export const getSchedule = (deptId, month) => 

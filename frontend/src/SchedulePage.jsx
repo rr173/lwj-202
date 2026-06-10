@@ -234,7 +234,7 @@ function SchedulePage() {
   const loadNurses = async () => {
     if (!selectedDept) return;
     try {
-      const res = await getNurses(selectedDept.id);
+      const res = await getNurses(selectedDept.id, month.format('YYYY-MM'));
       setNurses(res.data);
     } catch (err) {
       message.error('加载护士列表失败');
@@ -1641,15 +1641,19 @@ function SchedulePage() {
                       const fatigueHours = fatigueMap[nurse.id]?.total_hours;
                       const nurseSecondment = scheduleSecondments.find(s => s.nurse_id === nurse.id);
                       const isLentOut = !!nurseSecondment;
+                      const isBorrowed = nurse.is_secondment;
                       return (
                         <tr key={nurse.id}>
-                          <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left', background: isFatigue ? '#fff7e6' : (isLentOut ? '#f9f0ff' : 'transparent') }}>
-                            <Tooltip title={isFatigue ? `近7日累计${fatigueHours}小时` : (isLentOut ? `借调至${nurseSecondment.to_department_name || '其他科室'}` : '')}>
-                              <span style={{ color: isFatigue ? '#fa8c16' : (isLentOut ? '#722ed1' : 'inherit'), fontWeight: isFatigue || isLentOut ? '600' : 'normal' }}>
+                          <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left', background: isFatigue ? '#fff7e6' : (isLentOut || isBorrowed ? '#f9f0ff' : 'transparent') }}>
+                            <Tooltip title={isFatigue ? `近7日累计${fatigueHours}小时` : (isLentOut ? `借调至${nurseSecondment.to_department_name || '其他科室'}` : (isBorrowed ? `借入自${nurse.secondment_info?.from_department_name || '其他科室'}` : ''))}>
+                              <span style={{ color: isFatigue ? '#fa8c16' : (isLentOut || isBorrowed ? '#722ed1' : 'inherit'), fontWeight: isFatigue || isLentOut || isBorrowed ? '600' : 'normal' }}>
                                 {nurse.name}
                               </span>
                             </Tooltip>
-                            {isLentOut && (
+                            {isBorrowed && (
+                              <Tag color="orange" style={{ fontSize: '10px', padding: '0 4px', lineHeight: '16px', marginTop: '2px', display: 'inline-block' }}>借入</Tag>
+                            )}
+                            {isLentOut && !isBorrowed && (
                               <Tag color="purple" style={{ fontSize: '10px', padding: '0 4px', lineHeight: '16px', marginTop: '2px', display: 'inline-block' }}>外借</Tag>
                             )}
                             <div style={{ fontSize: '12px', color: nurse.level === 'senior' ? '#fa8c16' : '#999' }}>
@@ -1689,7 +1693,7 @@ function SchedulePage() {
                                   padding: '4px', 
                                   textAlign: 'center', 
                                   verticalAlign: 'top',
-                                  background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : (isFatigue ? '#fffbe6' : (isLentOut ? '#f9f0ff' : 'transparent')))
+                                  background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : (isFatigue ? '#fffbe6' : (isLentOut || isBorrowed ? '#f9f0ff' : 'transparent')))
                                 }}
                               >
                                 {shift && !isSubstitute && (
@@ -1951,6 +1955,7 @@ function SchedulePage() {
               {nurses.filter(n => n.id !== selectedCell?.nurse?.id).map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                  {nurse.is_secondment && <Tag color="orange" style={{ marginLeft: 4, fontSize: '10px' }}>借入</Tag>}
                   {fatigueMap[nurse.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}
@@ -1979,6 +1984,7 @@ function SchedulePage() {
               {nurses.map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                  {nurse.is_secondment && <Tag color="orange" style={{ marginLeft: 4, fontSize: '10px' }}>借入</Tag>}
                   {fatigueMap[nurse.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}
@@ -2032,6 +2038,7 @@ function SchedulePage() {
               {nurses.map(nurse => (
                 <Option key={nurse.id} value={nurse.id}>
                   {nurse.name} ({nurse.level === 'senior' ? '资深' : '普通'})
+                  {nurse.is_secondment && <Tag color="orange" style={{ marginLeft: 4, fontSize: '10px' }}>借入</Tag>}
                   {fatigueMap[nurse.id]?.is_fatigue_warning && <Tag color="orange" style={{ marginLeft: 4 }}>疲劳预警</Tag>}
                 </Option>
               ))}

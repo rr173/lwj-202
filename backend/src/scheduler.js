@@ -30,6 +30,19 @@ function canAssign(nurse, date, shift, unavailableDates, existingShifts) {
     return false;
   }
 
+  if (nurse.is_secondment && nurse.secondment_info) {
+    const info = nurse.secondment_info;
+    if (date < info.start_date || date > info.end_date) {
+      return false;
+    }
+    if (info.shifts && info.shifts !== 'all') {
+      const allowedShifts = info.shifts.split(',');
+      if (!allowedShifts.includes(shift)) {
+        return false;
+      }
+    }
+  }
+
   if (shift === 'night') {
     if (existingShifts[nurseId] && existingShifts[nurseId][prevDate] === 'night') {
       return false;

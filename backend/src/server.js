@@ -471,29 +471,80 @@ app.post('/api/departments', (req, res) => {
 
 app.get('/api/departments/:id/nurses', (req, res) => {
   const { id } = req.params;
+  const { month } = req.query;
+
   db.all('SELECT * FROM nurses WHERE department_id = ? ORDER BY id', [id], (err, nurses) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
 
-    const nurseIds = nurses.map(n => n.id);
-    if (nurseIds.length === 0) return res.json(nurses);
+    const ownNurseIds = nurses.map(n => n.id);
 
-    const placeholders = nurseIds.map(() => '?').join(',');
-    db.all(`SELECT ns.nurse_id, ns.skill_id, st.name as skill_name FROM nurse_skills ns JOIN skill_tags st ON ns.skill_id = st.id WHERE ns.nurse_id IN (${placeholders}) ORDER BY st.name`, nurseIds, (err, skills) => {
+    let secondmentQuery = `SELECT sr.nurse_id, sr.start_date, sr.end_date, sr.shifts,
+                                  n.id as nid, n.name, n.department_id, n.level, n.hire_date,
+                                  fd.name as from_department_name
+                           FROM secondment_requests sr
+                           JOIN nurses n ON sr.nurse_id = n.id
+                           JOIN departments fd ON sr.from_department_id = fd.id
+                           WHERE sr.to_department_id = ? AND sr.status = 'approved'`;
+    const secondmentParams = [id];
+
+    if (month) {
+      const [year, monthNum] = month.split('-').map(Number);
+      const monthEnd = dayjs(`${year}-${String(monthNum).padStart(2, '0')}-01`).endOf('month').format('YYYY-MM-DD');
+      const monthStart = `${year}-${String(monthNum).padStart(2, '0')}-01`;
+      secondmentQuery += ' AND sr.start_date <= ? AND sr.end_date >= ?';
+      secondmentParams.push(monthEnd, monthStart);
+    } else {
+      const today = dayjs().format('YYYY-MM-DD');
+      secondmentQuery += ' AND sr.start_date <= ? AND sr.end_date >= ?';
+      secondmentParams.push(today, today);
+    }
+
+    db.all(secondmentQuery, secondmentParams, (err, secondedNurses) => {
       if (err) {
         return res.status(500).json({ error: err.message });
       }
-      const skillMap = {};
-      skills.forEach(s => {
-        if (!skillMap[s.nurse_id]) skillMap[s.nurse_id] = [];
-        skillMap[s.nurse_id].push({ skill_id: s.skill_id, skill_name: s.skill_name });
-      });
-      const result = nurses.map(n => ({
-        ...n,
-        skills: skillMap[n.id] || []
+
+      const borrowedNurses = secondedNurses.filter(s => !ownNurseIds.includes(s.nurse_id)).map(s => ({
+        id: s.nurse_id,
+        name: s.name,
+        department_id: s.department_id,
+        level: s.level,
+        hire_date: s.hire_date,
+        is_secondment: true,
+        secondment_info: {
+          from_department_name: s.from_department_name,
+          start_date: s.start_date,
+          end_date: s.end_date,
+          shifts: s.shifts
+        }
       }));
-      res.json(result);
+
+      const allNurses = [
+        ...nurses.map(n => ({ ...n, is_secondment: false })),
+        ...borrowedNurses
+      ];
+
+      const allNurseIds = allNurses.map(n => n.id);
+      if (allNurseIds.length === 0) return res.json(allNurses);
+
+      const placeholders = allNurseIds.map(() => '?').join(',');
+      db.all(`SELECT ns.nurse_id, ns.skill_id, st.name as skill_name FROM nurse_skills ns JOIN skill_tags st ON ns.skill_id = st.id WHERE ns.nurse_id IN (${placeholders}) ORDER BY st.name`, allNurseIds, (err, skills) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        const skillMap = {};
+        skills.forEach(s => {
+          if (!skillMap[s.nurse_id]) skillMap[s.nurse_id] = [];
+          skillMap[s.nurse_id].push({ skill_id: s.skill_id, skill_name: s.skill_name });
+        });
+        const result = allNurses.map(n => ({
+          ...n,
+          skills: skillMap[n.id] || []
+        }));
+        res.json(result);
+      });
     });
   });
 });
@@ -600,48 +651,85 @@ app.post('/api/departments/:id/generate-schedule', (req, res) => {
     return res.status(400).json({ error: '请提供月份参数' });
   }
 
-  db.all('SELECT * FROM nurses WHERE department_id = ?', [id], (err, nurses) => {
+  db.all('SELECT * FROM nurses WHERE department_id = ?', [id], (err, ownNurses) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
 
-    if (nurses.length === 0) {
-      return res.status(400).json({ error: '该科室暂无护士' });
-    }
+    const [year, monthNum] = month.split('-').map(Number);
+    const monthStart = `${year}-${String(monthNum).padStart(2, '0')}-01`;
+    const monthEnd = dayjs(monthStart).endOf('month').format('YYYY-MM-DD');
 
-    const nurseIds = nurses.map(n => n.id);
-    const placeholders = nurseIds.map(() => '?').join(',');
-    
-    db.all(`SELECT * FROM unavailable_dates WHERE nurse_id IN (${placeholders})`, nurseIds, (err, unavailableDates) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-
-      db.all('SELECT ns.nurse_id, ns.skill_id FROM nurse_skills ns JOIN nurses n ON ns.nurse_id = n.id WHERE n.department_id = ?', [id], (err, nurseSkills) => {
+    db.all(
+      `SELECT sr.nurse_id, sr.start_date, sr.end_date, sr.shifts as secondment_shifts,
+              n.id, n.name, n.department_id, n.level, n.hire_date
+       FROM secondment_requests sr
+       JOIN nurses n ON sr.nurse_id = n.id
+       WHERE sr.to_department_id = ? AND sr.status = 'approved'
+       AND sr.start_date <= ? AND sr.end_date >= ?`,
+      [id, monthEnd, monthStart],
+      (err, secondedRows) => {
         if (err) {
           return res.status(500).json({ error: err.message });
         }
 
-        db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ?', [id], (err, shiftRequirements) => {
+        const ownNurseIds = new Set(ownNurses.map(n => n.id));
+        const borrowedNurses = secondedRows.filter(s => !ownNurseIds.has(s.nurse_id)).map(s => ({
+          id: s.nurse_id,
+          name: s.name,
+          department_id: s.department_id,
+          level: s.level,
+          hire_date: s.hire_date,
+          is_secondment: true,
+          secondment_info: {
+            start_date: s.start_date,
+            end_date: s.end_date,
+            shifts: s.secondment_shifts
+          }
+        }));
+
+        const nurses = [
+          ...ownNurses.map(n => ({ ...n, is_secondment: false })),
+          ...borrowedNurses
+        ];
+
+        if (nurses.length === 0) {
+          return res.status(400).json({ error: '该科室暂无护士' });
+        }
+
+        const nurseIds = nurses.map(n => n.id);
+        const placeholders = nurseIds.map(() => '?').join(',');
+
+        db.all(`SELECT * FROM unavailable_dates WHERE nurse_id IN (${placeholders})`, nurseIds, (err, unavailableDates) => {
           if (err) {
             return res.status(500).json({ error: err.message });
           }
 
-          const result = generateSchedule(id, nurses, month, unavailableDates, nurseSkills, shiftRequirements);
-
-          if (!result.success) {
-            return res.status(400).json({ error: result.reason });
-          }
-
-          db.run('DELETE FROM schedules WHERE department_id = ? AND month = ?', [id, month], function(err) {
+          db.all(`SELECT ns.nurse_id, ns.skill_id FROM nurse_skills ns WHERE ns.nurse_id IN (${placeholders})`, nurseIds, (err, nurseSkills) => {
             if (err) {
               return res.status(500).json({ error: err.message });
             }
 
-            const stmt = db.prepare('INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)');
-            result.schedule.forEach(s => {
-              stmt.run(s.department_id, s.nurse_id, s.date, s.shift, s.month);
-            });
+            db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ?', [id], (err, shiftRequirements) => {
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+
+              const result = generateSchedule(id, nurses, month, unavailableDates, nurseSkills, shiftRequirements);
+
+              if (!result.success) {
+                return res.status(400).json({ error: result.reason });
+              }
+
+              db.run('DELETE FROM schedules WHERE department_id = ? AND month = ?', [id, month], function(err) {
+                if (err) {
+                  return res.status(500).json({ error: err.message });
+                }
+
+                const stmt = db.prepare('INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)');
+                result.schedule.forEach(s => {
+                  stmt.run(s.department_id, s.nurse_id, s.date, s.shift, s.month);
+                });
             stmt.finalize((err) => {
               if (err) {
                 return res.status(500).json({ error: err.message });
@@ -658,6 +746,7 @@ app.post('/api/departments/:id/generate-schedule', (req, res) => {
         });
       });
     });
+  });
   });
 });
 
