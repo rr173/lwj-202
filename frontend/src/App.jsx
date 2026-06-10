@@ -4,11 +4,23 @@ import SchedulePage from './SchedulePage';
 import TrainingPage from './TrainingPage';
 import EventPage from './EventPage';
 import HandoverPage from './HandoverPage';
+import AssessmentPage from './AssessmentPage';
 
 const { Header } = Layout;
 
 function App() {
   const [currentModule, setCurrentModule] = useState('schedule');
+
+  const renderPage = () => {
+    switch (currentModule) {
+      case 'schedule': return <SchedulePage />;
+      case 'training': return <TrainingPage />;
+      case 'event': return <EventPage />;
+      case 'handover': return <HandoverPage />;
+      case 'assessment': return <AssessmentPage />;
+      default: return <SchedulePage />;
+    }
+  };
 
   return (
     <Layout style={{ height: '100vh' }}>
@@ -24,12 +36,13 @@ function App() {
               { key: 'schedule', label: '排班管理' },
               { key: 'training', label: '培训管理' },
               { key: 'event', label: '事件管理' },
-              { key: 'handover', label: '交接班' }
+              { key: 'handover', label: '交接班' },
+              { key: 'assessment', label: '考核管理' }
             ]}
           />
         </div>
       </Header>
-      {currentModule === 'schedule' ? <SchedulePage /> : currentModule === 'training' ? <TrainingPage /> : currentModule === 'event' ? <EventPage /> : <HandoverPage />}
+      {renderPage()}
     </Layout>
   );
 }

@@ -195,4 +195,34 @@ export const getLentOutNurses = (deptId, date) =>
 export const getSecondmentMonthlyReport = (deptId, month) =>
   api.get(`/departments/${deptId}/secondment-monthly-report`, { params: { month } });
 
+export const getAssessmentWeightConfig = (deptId) =>
+  api.get(`/assessment-weight-config/${deptId}`);
+
+export const updateAssessmentWeightConfig = (data) =>
+  api.post('/assessment-weight-config', data);
+
+export const createQualityAssessment = (data) =>
+  api.post('/quality-assessments', data);
+
+export const getAssessmentHistory = (params) =>
+  api.get('/quality-assessments/history', { params });
+
+export const getAssessmentById = (id) =>
+  api.get(`/quality-assessments/${id}`);
+
+export const getAssessmentRanking = (deptId, month) =>
+  api.get(`/quality-assessments/ranking/${deptId}`, { params: { month } });
+
+export const getAssessmentMonthPreview = (deptId, month) =>
+  api.get(`/quality-assessments/month-preview/${deptId}`, { params: { month } });
+
+export const getAssessmentTrend = (nurseId, params) =>
+  api.get(`/quality-assessments/trend/${nurseId}`, { params });
+
+export const deleteAssessment = (id) =>
+  api.delete(`/quality-assessments/${id}`);
+
+export const getAssessmentAutoInfo = (nurseId, params) =>
+  api.get(`/quality-assessments/auto-info/${nurseId}`, { params });
+
 export default api;

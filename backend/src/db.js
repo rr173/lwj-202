@@ -262,6 +262,49 @@ db.serialize(() => {
     FOREIGN KEY (department_id) REFERENCES departments(id),
     UNIQUE(department_id, year)
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS assessment_weight_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    attendance_weight REAL NOT NULL DEFAULT 25,
+    operation_weight REAL NOT NULL DEFAULT 25,
+    satisfaction_weight REAL NOT NULL DEFAULT 25,
+    teamwork_weight REAL NOT NULL DEFAULT 25,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(department_id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS quality_assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    attendance_score REAL NOT NULL DEFAULT 0,
+    operation_score REAL NOT NULL DEFAULT 0,
+    satisfaction_score REAL NOT NULL DEFAULT 0,
+    teamwork_score REAL NOT NULL DEFAULT 0,
+    attendance_adjustment REAL NOT NULL DEFAULT 0,
+    operation_adjustment REAL NOT NULL DEFAULT 0,
+    satisfaction_adjustment REAL NOT NULL DEFAULT 0,
+    teamwork_adjustment REAL NOT NULL DEFAULT 0,
+    final_attendance REAL NOT NULL DEFAULT 0,
+    final_operation REAL NOT NULL DEFAULT 0,
+    final_satisfaction REAL NOT NULL DEFAULT 0,
+    final_teamwork REAL NOT NULL DEFAULT 0,
+    weighted_total REAL NOT NULL DEFAULT 0,
+    adverse_event_count INTEGER NOT NULL DEFAULT 0,
+    is_full_attendance INTEGER NOT NULL DEFAULT 0,
+    remark TEXT,
+    evaluator_id INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (evaluator_id) REFERENCES nurses(id),
+    UNIQUE(nurse_id, month)
+  )`);
 });
 
 module.exports = db;
