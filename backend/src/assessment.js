@@ -486,10 +486,22 @@ function recalculateAndUpdateAssessment(assessmentId, newScores, weights) {
   });
 }
 
+function getNurseById(nurseId) {
+  return new Promise((resolve, reject) => {
+    db.get('SELECT * FROM nurses WHERE id = ?', [nurseId], (err, row) => {
+      if (err) return reject(err);
+      resolve(row);
+    });
+  });
+}
+
 router.post('/quality-assessments/:id/appeal', async (req, res) => {
   const { id } = req.params;
   const { appeal_reason, expected_dimension, expected_score, nurse_id } = req.body;
 
+  if (!nurse_id) {
+    return res.status(400).json({ error: '请提供申诉人护士ID' });
+  }
   if (!appeal_reason || !appeal_reason.trim()) {
     return res.status(400).json({ error: '请填写申诉理由' });
   }
@@ -510,7 +522,7 @@ router.post('/quality-assessments/:id/appeal', async (req, res) => {
       return res.status(404).json({ error: '考核记录不存在' });
     }
 
-    if (nurse_id && assessment.nurse_id !== Number(nurse_id)) {
+    if (assessment.nurse_id !== Number(nurse_id)) {
       return res.status(403).json({ error: '只能对自己的考核记录发起申诉' });
     }
 
@@ -632,6 +644,9 @@ router.put('/assessment-appeals/:id/handle', async (req, res) => {
   const { id } = req.params;
   const { handle_result, handle_reason, handled_by, scores } = req.body;
 
+  if (!handled_by) {
+    return res.status(400).json({ error: '请提供处理人ID' });
+  }
   if (!handle_result || !['maintain', 'adjust'].includes(handle_result)) {
     return res.status(400).json({ error: '请选择处理结果' });
   }
@@ -640,6 +655,14 @@ router.put('/assessment-appeals/:id/handle', async (req, res) => {
   }
 
   try {
+    const handler = await getNurseById(handled_by);
+    if (!handler) {
+      return res.status(403).json({ error: '处理人不存在' });
+    }
+    if (handler.level !== 'senior') {
+      return res.status(403).json({ error: '只有护士长可以处理申诉' });
+    }
+
     const appeal = await new Promise((resolve, reject) => {
       db.get('SELECT * FROM assessment_appeals WHERE id = ?', [id], (err, row) => {
         if (err) return reject(err);
@@ -652,6 +675,9 @@ router.put('/assessment-appeals/:id/handle', async (req, res) => {
     }
     if (appeal.status !== 'pending') {
       return res.status(400).json({ error: '该申诉已处理' });
+    }
+    if (appeal.department_id !== handler.department_id) {
+      return res.status(403).json({ error: '只能处理本科室的申诉' });
     }
 
     let updateData = {
