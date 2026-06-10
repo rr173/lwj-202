@@ -5,11 +5,24 @@ const dayjs = require('dayjs');
 
 const SHIFT_NAMES = { morning: '早班', afternoon: '中班', night: '夜班' };
 
-function validateScheduleForHandover(nurseId, date, shiftType) {
+function checkNurseSchedule(nurseId, date) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      'SELECT shift FROM schedules WHERE nurse_id = ? AND date = ?',
+      [Number(nurseId), date],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row ? row.shift : null);
+      }
+    );
+  });
+}
+
+function checkNurseShiftSchedule(nurseId, date, shiftType) {
   return new Promise((resolve, reject) => {
     db.get(
       'SELECT * FROM schedules WHERE nurse_id = ? AND date = ? AND shift = ?',
-      [nurseId, date, shiftType],
+      [Number(nurseId), date, shiftType],
       (err, row) => {
         if (err) return reject(err);
         resolve(!!row);
@@ -141,25 +154,19 @@ router.post('/handovers', async (req, res) => {
   }
 
   try {
-    const fromScheduled = await validateScheduleForHandover(from_nurse_id, handover_date, shift_type);
+    const fromScheduled = await checkNurseShiftSchedule(from_nurse_id, handover_date, shift_type);
     if (!fromScheduled) {
       return res.status(400).json({ error: `交班人当天没有对应的${SHIFT_NAMES[shift_type]}排班，无法创建交接记录` });
     }
 
-    const existingToShift = await new Promise((resolve, reject) => {
-      db.get('SELECT shift FROM schedules WHERE nurse_id = ? AND date = ?', [to_nurse_id, handover_date], (err, row) => {
-        if (err) return reject(err);
-        resolve(row ? row.shift : null);
-      });
-    });
-
-    if (!existingToShift) {
+    const toNurseShift = await checkNurseSchedule(to_nurse_id, handover_date);
+    if (!toNurseShift) {
       return res.status(400).json({ error: '接班人当天没有排班，无法创建交接记录' });
     }
 
     const shiftOrder = { morning: 1, afternoon: 2, night: 3 };
-    if (shiftOrder[existingToShift] < shiftOrder[shift_type]) {
-      return res.status(400).json({ error: `接班人当天排班为${SHIFT_NAMES[existingToShift]}，不是${SHIFT_NAMES[shift_type]}的接续班次` });
+    if (shiftOrder[toNurseShift] < shiftOrder[shift_type]) {
+      return res.status(400).json({ error: `接班人当天排班为${SHIFT_NAMES[toNurseShift]}，不是${SHIFT_NAMES[shift_type]}的接续班次` });
     }
 
     db.serialize(() => {
@@ -300,8 +307,8 @@ router.put('/handovers/:id/signoff', async (req, res) => {
 
     await new Promise((resolve, reject) => {
       db.run(
-        'INSERT INTO handover_signoffs (item_id, nurse_id, result, remark) VALUES (?, ?, ?, ?)',
-        [item_id, nurse_id, result, remark || null],
+        'INSERT INTO handover_signoffs (item_id, nurse_id, result, remark, signed_at) VALUES (?, ?, ?, ?, ?)',
+        [item_id, nurse_id, result, remark || null, dayjs().format('YYYY-MM-DD HH:mm:ss')],
         function (err) {
           if (err) return reject(err);
           resolve(this.lastID);
@@ -347,8 +354,8 @@ router.put('/handovers/:id/head-nurse-confirm', async (req, res) => {
 
     await new Promise((resolve, reject) => {
       db.run(
-        'UPDATE shift_handovers SET status = ?, head_nurse_id = ?, head_nurse_remark = ?, head_nurse_confirmed_at = ? WHERE id = ?',
-        ['completed', head_nurse_id, remark || null, dayjs().format('YYYY-MM-DD HH:mm:ss'), id],
+        'UPDATE shift_handovers SET status = ?, to_nurse_signed_at = ?, head_nurse_id = ?, head_nurse_remark = ?, head_nurse_confirmed_at = ? WHERE id = ?',
+        ['completed', dayjs().format('YYYY-MM-DD HH:mm:ss'), head_nurse_id, remark || null, dayjs().format('YYYY-MM-DD HH:mm:ss'), id],
         function (err) {
           if (err) return reject(err);
           resolve();
@@ -383,59 +390,96 @@ router.get('/handover-statistics', (req, res) => {
       const disputed = handovers.filter(h => h.status === 'disputed').length;
       const completion_rate = total > 0 ? Math.round((completed / total) * 1000) / 10 : 0;
 
-      const completedHandovers = handovers.filter(h => h.status === 'completed' && h.from_nurse_signed_at && h.to_nurse_signed_at);
-      let totalSignoffMinutes = 0;
-      let signoffCount = 0;
+      const completedIds = handovers.filter(h => h.status === 'completed').map(h => h.id);
 
-      completedHandovers.forEach(h => {
-        const fromTime = dayjs(h.from_nurse_signed_at);
-        const toTime = dayjs(h.to_nurse_signed_at);
-        if (fromTime.isValid() && toTime.isValid()) {
-          const diffMinutes = Math.abs(toTime.diff(fromTime, 'minute'));
-          totalSignoffMinutes += diffMinutes;
-          signoffCount++;
-        }
-      });
+      if (completedIds.length === 0) {
+        return finishStats({
+          total, completed, disputed,
+          pending_sign: handovers.filter(h => h.status === 'pending_sign').length,
+          pending_confirm: handovers.filter(h => h.status === 'pending_confirm').length,
+          completion_rate,
+          avg_signoff_minutes: 0,
+          item_type_distribution: [],
+          urgency_distribution: []
+        });
+      }
 
-      const avg_signoff_minutes = signoffCount > 0 ? Math.round(totalSignoffMinutes / signoffCount) : 0;
+      const placeholders = completedIds.map(() => '?').join(',');
 
       db.all(
-        `SELECT hi.item_type, COUNT(*) as count
-         FROM handover_items hi
-         JOIN shift_handovers sh ON hi.handover_id = sh.id
-         WHERE sh.department_id = ? AND sh.handover_date LIKE ?
-         GROUP BY hi.item_type`,
-        [department_id, monthPrefix],
-        (err2, typeStats) => {
+        `SELECT s.item_id, s.signed_at, hi.handover_id
+         FROM handover_signoffs s
+         JOIN handover_items hi ON s.item_id = hi.id
+         WHERE hi.handover_id IN (${placeholders})
+         ORDER BY hi.handover_id, s.signed_at DESC`,
+        completedIds,
+        (err2, signoffs) => {
           if (err2) return res.status(500).json({ error: err2.message });
 
+          const handoverMap = {};
+          handovers.forEach(h => { handoverMap[h.id] = h; });
+
+          let totalSignoffMinutes = 0;
+          let signoffCount = 0;
+
+          completedIds.forEach(hId => {
+            const handover = handoverMap[hId];
+            const itemsSignoffs = signoffs.filter(s => s.handover_id === hId);
+            if (itemsSignoffs.length === 0) return;
+
+            const fromTime = dayjs(handover.from_nurse_signed_at);
+            const lastSignoffTime = dayjs(itemsSignoffs[0].signed_at);
+
+            if (fromTime.isValid() && lastSignoffTime.isValid()) {
+              const diffMinutes = Math.abs(lastSignoffTime.diff(fromTime, 'minute'));
+              totalSignoffMinutes += diffMinutes;
+              signoffCount++;
+            }
+          });
+
+          const avg_signoff_minutes = signoffCount > 0 ? Math.round(totalSignoffMinutes / signoffCount) : 0;
+
           db.all(
-            `SELECT hi.urgency, COUNT(*) as count
+            `SELECT hi.item_type, COUNT(*) as count
              FROM handover_items hi
              JOIN shift_handovers sh ON hi.handover_id = sh.id
              WHERE sh.department_id = ? AND sh.handover_date LIKE ?
-             GROUP BY hi.urgency`,
+             GROUP BY hi.item_type`,
             [department_id, monthPrefix],
-            (err3, urgencyStats) => {
+            (err3, typeStats) => {
               if (err3) return res.status(500).json({ error: err3.message });
 
-              res.json({
-                total,
-                completed,
-                disputed,
-                pending_sign: handovers.filter(h => h.status === 'pending_sign').length,
-                pending_confirm: handovers.filter(h => h.status === 'pending_confirm').length,
-                completion_rate,
-                avg_signoff_minutes,
-                item_type_distribution: typeStats,
-                urgency_distribution: urgencyStats
-              });
+              db.all(
+                `SELECT hi.urgency, COUNT(*) as count
+                 FROM handover_items hi
+                 JOIN shift_handovers sh ON hi.handover_id = sh.id
+                 WHERE sh.department_id = ? AND sh.handover_date LIKE ?
+                 GROUP BY hi.urgency`,
+                [department_id, monthPrefix],
+                (err4, urgencyStats) => {
+                  if (err4) return res.status(500).json({ error: err4.message });
+
+                  finishStats({
+                    total, completed, disputed,
+                    pending_sign: handovers.filter(h => h.status === 'pending_sign').length,
+                    pending_confirm: handovers.filter(h => h.status === 'pending_confirm').length,
+                    completion_rate,
+                    avg_signoff_minutes,
+                    item_type_distribution: typeStats,
+                    urgency_distribution: urgencyStats
+                  });
+                }
+              );
             }
           );
         }
       );
     }
   );
+
+  function finishStats(data) {
+    res.json(data);
+  }
 });
 
 module.exports = router;

@@ -238,6 +238,184 @@ async function initDemoData() {
       );
     }
 
+    await runAsync('DELETE FROM handover_signoffs');
+    await runAsync('DELETE FROM handover_items');
+    await runAsync('DELETE FROM shift_handovers');
+
+    const allSchedules = await allAsync('SELECT * FROM schedules ORDER BY date, shift');
+    const scheduleByDateShift = {};
+    allSchedules.forEach(s => {
+      const key = `${s.date}_${s.shift}`;
+      if (!scheduleByDateShift[key]) scheduleByDateShift[key] = [];
+      scheduleByDateShift[key].push(s);
+    });
+
+    const shiftSequence = [
+      { from: 'morning', to: 'afternoon' },
+      { from: 'afternoon', to: 'night' }
+    ];
+
+    const demoHandoverConfigs = [];
+    const handoverDates = [];
+
+    const dateSet = [...new Set(allSchedules.map(s => s.date))].sort();
+    for (let i = 0; i < Math.min(dateSet.length, 10); i++) {
+      handoverDates.push(dateSet[i]);
+    }
+
+    for (const date of handoverDates) {
+      for (const seq of shiftSequence) {
+        const fromKey = `${date}_${seq.from}`;
+        const toKey = `${date}_${seq.to}`;
+        const fromNurses = scheduleByDateShift[fromKey] || [];
+        const toNurses = scheduleByDateShift[toKey] || [];
+        if (fromNurses.length > 0 && toNurses.length > 0) {
+          demoHandoverConfigs.push({
+            date,
+            shift_type: seq.from,
+            from_nurse_id: fromNurses[0].nurse_id,
+            to_nurse_id: toNurses[0].nurse_id
+          });
+        }
+      }
+    }
+
+    const demoHandoverData = [];
+    for (let i = 0; i < Math.min(demoHandoverConfigs.length, 8); i++) {
+      const cfg = demoHandoverConfigs[i];
+      const baseTime = dayjs(cfg.date).hour(cfg.shift_type === 'morning' ? 7 : cfg.shift_type === 'afternoon' ? 15 : 23).minute(30);
+
+      let status, items, fromSignedAt, toSignedAt, headNurseId, headNurseRemark, headNurseConfirmedAt;
+
+      if (i < 4) {
+        status = 'completed';
+        items = generateDemoItems(i);
+        fromSignedAt = baseTime.format('YYYY-MM-DD HH:mm:ss');
+        toSignedAt = baseTime.add(15 + i * 5, 'minute').format('YYYY-MM-DD HH:mm:ss');
+        headNurseId = null;
+        headNurseRemark = null;
+        headNurseConfirmedAt = null;
+      } else if (i === 4) {
+        status = 'completed';
+        items = generateDemoItems(4, true);
+        fromSignedAt = baseTime.format('YYYY-MM-DD HH:mm:ss');
+        toSignedAt = baseTime.add(25, 'minute').format('YYYY-MM-DD HH:mm:ss');
+        headNurseId = nurseIds[0].id;
+        headNurseRemark = '已确认，相关疑问已跟进处理';
+        headNurseConfirmedAt = baseTime.add(40, 'minute').format('YYYY-MM-DD HH:mm:ss');
+      } else if (i === 5) {
+        status = 'disputed';
+        items = generateDemoItems(5, true);
+        fromSignedAt = baseTime.format('YYYY-MM-DD HH:mm:ss');
+        toSignedAt = null;
+        headNurseId = null;
+        headNurseRemark = null;
+        headNurseConfirmedAt = null;
+      } else {
+        status = 'pending_confirm';
+        items = generateDemoItems(i);
+        fromSignedAt = baseTime.format('YYYY-MM-DD HH:mm:ss');
+        toSignedAt = null;
+        headNurseId = null;
+        headNurseRemark = null;
+        headNurseConfirmedAt = null;
+      }
+
+      demoHandoverData.push({
+        ...cfg,
+        status,
+        items,
+        fromSignedAt,
+        toSignedAt,
+        headNurseId,
+        headNurseRemark,
+        headNurseConfirmedAt
+      });
+    }
+
+    function generateDemoItems(index, hasQuestion = false) {
+      const itemSets = [
+        [
+          { item_type: 'abnormal', description: '3床患者上午9点出现胸闷气短，已通知值班医生，给予吸氧处理后症状缓解，需持续观察', urgency: 3 },
+          { item_type: 'key_patient', description: '8床老年患者跌倒风险评估为高危，已采取防护措施，夜间需加强巡视', urgency: 2 },
+          { item_type: 'todo', description: '12床患者今日预约CT检查，需提前做好检查前准备和宣教', urgency: 1 }
+        ],
+        [
+          { item_type: 'abnormal', description: '5床患者输液反应，出现寒战发热，已停止输液并报告医生，更换输液管路', urgency: 3 },
+          { item_type: 'key_patient', description: '15床术后患者引流管引流液颜色加深，需密切监测引流量和生命体征', urgency: 2 },
+          { item_type: 'todo', description: '新入院患者7床需完成入院评估和护理记录', urgency: 2 }
+        ],
+        [
+          { item_type: 'key_patient', description: '11床偏瘫患者足跟压疮换药，每班需检查受压部位皮肤状况', urgency: 2 },
+          { item_type: 'abnormal', description: '药房通知降压药缺货，10床和14床患者需联系医生更换替代药品', urgency: 2 },
+          { item_type: 'todo', description: '科室急救车物品需补充，已提交请领单', urgency: 1 }
+        ],
+        [
+          { item_type: 'key_patient', description: '2床心衰患者24小时出入量监测，严格控制输液速度和饮水量', urgency: 3 },
+          { item_type: 'todo', description: '交接班记录本和护理记录单需签完今日班次', urgency: 1 },
+          { item_type: 'abnormal', description: '6床患者家属对治疗费用有疑问，已解释但仍有不满情绪', urgency: 1 }
+        ],
+        [
+          { item_type: 'abnormal', description: '4床患者下午出现过敏反应，全身荨麻疹，已给予抗过敏处理', urgency: 3 },
+          { item_type: 'key_patient', description: '9床糖尿病患者空腹血糖持续偏高，需关注饮食控制和胰岛素用量', urgency: 2 },
+          { item_type: 'todo', description: '今日下午新转入患者需完成转科交接和护理评估', urgency: 2 }
+        ],
+        [
+          { item_type: 'abnormal', description: '1床患者夜间突发心率不齐，已通知医生处理，心电图已做', urgency: 3 },
+          { item_type: 'key_patient', description: '13床重症患者呼吸机参数有调整，需持续监测血氧饱和度', urgency: 3 },
+          { item_type: 'todo', description: '夜班期间需完成3名患者的生命体征测量记录', urgency: 1 }
+        ],
+        [
+          { item_type: 'key_patient', description: '18床患者今日手术，术后需密切观察伤口渗血和意识状态', urgency: 2 },
+          { item_type: 'todo', description: '明早需空腹抽血的患者有5名，提前准备好采血物品', urgency: 1 },
+          { item_type: 'abnormal', description: '16床患者下午请假外出未按时归院，已联系家属', urgency: 2 }
+        ],
+        [
+          { item_type: 'abnormal', description: '走廊消防通道堆放杂物被检查通报，需通知后勤清理', urgency: 1 },
+          { item_type: 'key_patient', description: '20床患者情绪低落有轻生倾向，需加强看护和心理疏导', urgency: 3 },
+          { item_type: 'todo', description: '科室消毒隔离检查明日进行，需提前整理相关台账', urgency: 2 }
+        ]
+      ];
+      const items = itemSets[index % itemSets.length];
+      return items;
+    }
+
+    for (const dh of demoHandoverData) {
+      const handoverResult = await runAsync(
+        'INSERT INTO shift_handovers (department_id, from_nurse_id, to_nurse_id, handover_date, shift_type, status, from_nurse_signed_at, to_nurse_signed_at, head_nurse_id, head_nurse_remark, head_nurse_confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [deptId, dh.from_nurse_id, dh.to_nurse_id, dh.date, dh.shift_type, dh.status, dh.fromSignedAt, dh.toSignedAt, dh.headNurseId, dh.headNurseRemark, dh.headNurseConfirmedAt]
+      );
+      const handoverId = handoverResult.lastID;
+
+      for (const item of dh.items) {
+        const itemResult = await runAsync(
+          'INSERT INTO handover_items (handover_id, item_type, description, urgency) VALUES (?, ?, ?, ?)',
+          [handoverId, item.item_type, item.description, item.urgency]
+        );
+        const itemId = itemResult.lastID;
+
+        if (dh.status === 'completed' || dh.status === 'disputed') {
+          const baseTime = dayjs(dh.fromSignedAt);
+          const signoffMinutes = 5 + Math.floor(Math.random() * 15);
+          const signoffAt = baseTime.add(signoffMinutes, 'minute').format('YYYY-MM-DD HH:mm:ss');
+
+          const isQuestionedItem = dh.status === 'disputed' && item.item_type === 'abnormal';
+          const isFirstCompletedDisputed = dh.status === 'completed' && dh.headNurseId && item.item_type === 'abnormal';
+
+          await runAsync(
+            'INSERT INTO handover_signoffs (item_id, nurse_id, result, remark, signed_at) VALUES (?, ?, ?, ?, ?)',
+            [
+              itemId,
+              dh.to_nurse_id,
+              (isQuestionedItem || isFirstCompletedDisputed) ? 'questioned' : 'confirmed',
+              (isQuestionedItem || isFirstCompletedDisputed) ? '需进一步确认相关情况' : null,
+              signoffAt
+            ]
+          );
+        }
+      }
+    }
+
     await runAsync('COMMIT');
 
     console.log('演示数据初始化成功!');
@@ -249,6 +427,7 @@ async function initDemoData() {
     console.log(`培训课程数: ${courses.length}`);
     console.log(`培训记录数: ${recordData.length}`);
     console.log(`不良事件数: ${demoEvents.length}`);
+    console.log(`交接班记录数: ${demoHandoverData.length}`);
   } catch (err) {
     console.error('初始化失败:', err);
     try { await runAsync('ROLLBACK'); } catch (e) { }
