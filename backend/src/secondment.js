@@ -122,7 +122,6 @@ router.post('/secondment-requests', async (req, res) => {
       });
     }
 
-    const shiftsStr = shifts || 'all';
 
     const result = await runAsync(
       `INSERT INTO secondment_requests (from_department_id, to_department_id, nurse_id, start_date, end_date, shifts, status, reason)
