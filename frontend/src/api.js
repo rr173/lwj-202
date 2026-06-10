@@ -168,4 +168,31 @@ export const headNurseConfirmHandover = (id, data) =>
 export const getHandoverStatistics = (params) =>
   api.get('/handover-statistics', { params });
 
+export const getSecondmentRequests = (params) =>
+  api.get('/secondment-requests', { params });
+
+export const getSecondmentRequest = (id) =>
+  api.get(`/secondment-requests/${id}`);
+
+export const createSecondmentRequest = (data) =>
+  api.post('/secondment-requests', data);
+
+export const approveSecondmentRequest = (id, data) =>
+  api.put(`/secondment-requests/${id}/approve`, data);
+
+export const rejectSecondmentRequest = (id, data) =>
+  api.put(`/secondment-requests/${id}/reject`, data);
+
+export const cancelSecondmentRequest = (id) =>
+  api.put(`/secondment-requests/${id}/cancel`);
+
+export const getSecondmentNurses = (deptId, date) =>
+  api.get(`/departments/${deptId}/secondment-nurses`, { params: { date } });
+
+export const getLentOutNurses = (deptId, date) =>
+  api.get(`/departments/${deptId}/lent-out-nurses`, { params: { date } });
+
+export const getSecondmentMonthlyReport = (deptId, month) =>
+  api.get(`/departments/${deptId}/secondment-monthly-report`, { params: { month } });
+
 export default api;

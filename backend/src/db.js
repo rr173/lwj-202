@@ -236,6 +236,23 @@ db.serialize(() => {
     UNIQUE(item_id)
   )`);
 
+  db.run(`CREATE TABLE IF NOT EXISTS secondment_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_department_id INTEGER NOT NULL,
+    to_department_id INTEGER NOT NULL,
+    nurse_id INTEGER NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    shifts TEXT NOT NULL DEFAULT 'all',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'cancelled')),
+    reason TEXT,
+    approver_remark TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (from_department_id) REFERENCES departments(id),
+    FOREIGN KEY (to_department_id) REFERENCES departments(id),
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id)
+  )`);
+
   db.run(`CREATE TABLE IF NOT EXISTS training_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     department_id INTEGER NOT NULL,

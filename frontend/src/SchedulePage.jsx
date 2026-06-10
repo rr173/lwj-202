@@ -3,6 +3,7 @@ import {
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
   message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert, Checkbox, Progress, InputNumber
 } from 'antd';
+const { RangePicker } = DatePicker;
 import dayjs from 'dayjs';
 import ReactECharts from 'echarts-for-react';
 import { 
@@ -17,7 +18,9 @@ import {
   updateNurseSkills,
   getShiftSkillRequirements, updateShiftSkillRequirements,
   getSkillCoverageReport,
-  getNurseLeaveBalance, getLeaveQuotaOverview, getLeaveQuotaConfig, updateLeaveQuotaConfig
+  getNurseLeaveBalance, getLeaveQuotaOverview, getLeaveQuotaConfig, updateLeaveQuotaConfig,
+  getSecondmentRequests, createSecondmentRequest, approveSecondmentRequest, rejectSecondmentRequest,
+  cancelSecondmentRequest, getSecondmentNurses, getLentOutNurses
 } from './api';
 
 const { Option } = Select;
@@ -62,6 +65,19 @@ const SUBSTITUTE_STATUS = {
 };
 
 const SHIFTS = ['morning', 'afternoon', 'night'];
+
+const SECONMENT_STATUS = {
+  pending: { text: '待审批', color: 'gold' },
+  approved: { text: '已通过', color: 'green' },
+  rejected: { text: '已拒绝', color: 'red' },
+  cancelled: { text: '已取消', color: 'default' }
+};
+
+const NURSE_TYPE_LABELS = {
+  own: { text: '本科室', color: 'blue' },
+  borrowed: { text: '借入', color: 'orange' },
+  lent_out: { text: '外借', color: 'purple' }
+};
 
 function FatigueWarningBanner({ fatigueData, expanded, onToggle }) {
   const warningNurses = (fatigueData || []).filter(n => n.is_fatigue_warning);
@@ -164,6 +180,14 @@ function SchedulePage() {
   const [leaveQuotaConfig, setLeaveQuotaConfig] = useState(null);
   const [quotaConfigModalVisible, setQuotaConfigModalVisible] = useState(false);
   const [editingQuotaConfig, setEditingQuotaConfig] = useState({ sick_days: 15, personal_days: 5 });
+  const [secondmentRequests, setSecondmentRequests] = useState([]);
+  const [secondmentModalVisible, setSecondmentModalVisible] = useState(false);
+  const [secondmentForm] = Form.useForm();
+  const [secondmentNurses, setSecondmentNurses] = useState([]);
+  const [lentOutNurses, setLentOutNurses] = useState([]);
+  const [secondmentStatusFilter, setSecondmentStatusFilter] = useState(null);
+  const [fromDeptNurses, setFromDeptNurses] = useState([]);
+  const [scheduleSecondments, setScheduleSecondments] = useState([]);
 
   const fatigueMap = {};
   (fatigueData || []).forEach(f => {
@@ -189,6 +213,9 @@ function SchedulePage() {
       loadSkillCoverageReport();
       loadLeaveQuotaOverview();
       loadLeaveQuotaConfig();
+      loadSecondmentRequests();
+      loadSecondmentNurses();
+      loadLentOutNurses();
     }
   }, [selectedDept, month]);
 
@@ -221,6 +248,7 @@ function SchedulePage() {
       if (res.data.schedules) {
         setSchedule(res.data.schedules);
         setShiftSkillReqs(res.data.shift_skill_requirements || []);
+        setScheduleSecondments(res.data.secondments || []);
       } else {
         setSchedule(res.data);
       }
@@ -355,6 +383,114 @@ function SchedulePage() {
       return res.data;
     } catch (err) {
       return null;
+    }
+  };
+
+  const loadSecondmentRequests = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getSecondmentRequests({ department_id: selectedDept.id });
+      setSecondmentRequests(res.data);
+    } catch (err) {
+      setSecondmentRequests([]);
+    }
+  };
+
+  const loadSecondmentNurses = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getSecondmentNurses(selectedDept.id, dayjs().format('YYYY-MM-DD'));
+      setSecondmentNurses(res.data);
+    } catch (err) {
+      setSecondmentNurses([]);
+    }
+  };
+
+  const loadLentOutNurses = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getLentOutNurses(selectedDept.id, dayjs().format('YYYY-MM-DD'));
+      setLentOutNurses(res.data);
+    } catch (err) {
+      setLentOutNurses([]);
+    }
+  };
+
+  const handleSecondmentSubmit = async () => {
+    try {
+      const values = await secondmentForm.validateFields();
+      await createSecondmentRequest({
+        from_department_id: values.from_department_id,
+        to_department_id: selectedDept.id,
+        nurse_id: values.nurse_id,
+        start_date: values.date_range[0].format('YYYY-MM-DD'),
+        end_date: values.date_range[1].format('YYYY-MM-DD'),
+        shifts: values.shifts || 'all',
+        reason: values.reason
+      });
+      message.success('借调申请已提交');
+      setSecondmentModalVisible(false);
+      secondmentForm.resetFields();
+      setFromDeptNurses([]);
+      loadSecondmentRequests();
+      loadSecondmentNurses();
+      loadLentOutNurses();
+    } catch (err) {
+      if (err.response?.data?.error) {
+        message.error(err.response.data.error);
+      } else if (err.message) {
+        message.error('提交失败');
+      }
+    }
+  };
+
+  const handleApproveSecondment = async (id) => {
+    try {
+      await approveSecondmentRequest(id);
+      message.success('借调审批通过');
+      loadSecondmentRequests();
+      loadSecondmentNurses();
+      loadLentOutNurses();
+      loadSchedule();
+      loadMonthlyReport();
+    } catch (err) {
+      message.error(`审批失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleRejectSecondment = async (id) => {
+    try {
+      await rejectSecondmentRequest(id);
+      message.success('已拒绝借调申请');
+      loadSecondmentRequests();
+    } catch (err) {
+      message.error(`操作失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleCancelSecondment = async (id) => {
+    try {
+      await cancelSecondmentRequest(id);
+      message.success('已取消借调');
+      loadSecondmentRequests();
+      loadSecondmentNurses();
+      loadLentOutNurses();
+    } catch (err) {
+      message.error(`操作失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleFromDeptChange = async (deptId) => {
+    secondmentForm.setFieldsValue({ nurse_id: undefined });
+    if (!deptId) {
+      setFromDeptNurses([]);
+      return;
+    }
+    try {
+      const res = await getNurses(deptId);
+      setFromDeptNurses(res.data);
+    } catch (err) {
+      setFromDeptNurses([]);
     }
   };
 
@@ -826,7 +962,10 @@ function SchedulePage() {
   const pendingLeaveCount = leaveRequests.filter(r => r.status === 'pending').length;
 
   const getChartOption = () => {
-    const names = monthlyReport.map(r => r.nurse_name);
+    const names = monthlyReport.map(r => {
+      const typeLabel = r.nurse_type === 'borrowed' ? '(借入)' : r.nurse_type === 'lent_out' ? '(外借)' : '';
+      return `${r.nurse_name}${typeLabel}`;
+    });
     const normalHours = monthlyReport.map(r => r.normal_hours);
     const substituteHours = monthlyReport.map(r => r.substitute_hours || 0);
     const overtimeHours = monthlyReport.map(r => r.overtime_hours);
@@ -894,7 +1033,40 @@ function SchedulePage() {
       dataIndex: 'nurse_name',
       key: 'nurse_name',
       width: 100,
-      fixed: 'left'
+      fixed: 'left',
+      render: (text, record) => (
+        <span>
+          {text}
+          {record.nurse_type && record.nurse_type !== 'own' && (
+            <Tag color={NURSE_TYPE_LABELS[record.nurse_type]?.color} style={{ marginLeft: 4, fontSize: '10px', padding: '0 4px', lineHeight: '16px' }}>
+              {NURSE_TYPE_LABELS[record.nurse_type]?.text}
+            </Tag>
+          )}
+        </span>
+      )
+    },
+    {
+      title: '类型',
+      dataIndex: 'nurse_type',
+      key: 'nurse_type',
+      width: 70,
+      align: 'center',
+      render: (val) => val ? (
+        <Tag color={NURSE_TYPE_LABELS[val]?.color || 'default'}>
+          {NURSE_TYPE_LABELS[val]?.text || val}
+        </Tag>
+      ) : <Tag color="blue">本科室</Tag>
+    },
+    {
+      title: '来源/去向',
+      key: 'dept_info',
+      width: 120,
+      align: 'center',
+      render: (_, record) => {
+        if (record.nurse_type === 'borrowed') return <span style={{ fontSize: '12px', color: '#fa8c16' }}>来自{record.borrowed_from}</span>;
+        if (record.nurse_type === 'lent_out') return <span style={{ fontSize: '12px', color: '#722ed1' }}>借至{record.lent_out_to}</span>;
+        return <span style={{ color: '#999' }}>—</span>;
+      }
     },
     {
       title: '排班班次',
@@ -1252,6 +1424,103 @@ function SchedulePage() {
           )}
         </div>
       )
+    },
+    {
+      key: 'secondment',
+      label: (
+        <span>
+          借调管理
+          {secondmentRequests.filter(r => r.status === 'pending' && r.from_department_id === selectedDept?.id).length > 0 && <Badge count={secondmentRequests.filter(r => r.status === 'pending' && r.from_department_id === selectedDept?.id).length} style={{ marginLeft: 8 }} />}
+        </span>
+      ),
+      children: (
+        <div style={{ padding: '8px 0' }}>
+          {lentOutNurses.length > 0 && (
+            <div style={{ marginBottom: '12px', padding: '8px', background: '#f9f0ff', borderRadius: '4px', border: '1px solid #d3adf7' }}>
+              <div style={{ fontWeight: '500', color: '#722ed1', marginBottom: '4px', fontSize: '12px' }}>当前外借护士</div>
+              {lentOutNurses.map(s => (
+                <div key={s.id} style={{ fontSize: '12px', color: '#666', marginBottom: '2px' }}>
+                  {s.nurse_name} → {s.to_department_name} ({s.start_date} ~ {s.end_date})
+                </div>
+              ))}
+            </div>
+          )}
+          {secondmentNurses.length > 0 && (
+            <div style={{ marginBottom: '12px', padding: '8px', background: '#fff7e6', borderRadius: '4px', border: '1px solid #ffd591' }}>
+              <div style={{ fontWeight: '500', color: '#fa8c16', marginBottom: '4px', fontSize: '12px' }}>当前借入护士</div>
+              {secondmentNurses.map(s => (
+                <div key={s.id} style={{ fontSize: '12px', color: '#666', marginBottom: '2px' }}>
+                  {s.nurse_name} ← {s.from_department_name} ({s.start_date} ~ {s.end_date})
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ marginBottom: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '13px', fontWeight: '500' }}>借调记录</span>
+            <Select
+              size="small"
+              allowClear
+              placeholder="按状态筛选"
+              style={{ width: 120 }}
+              value={secondmentStatusFilter}
+              onChange={(val) => setSecondmentStatusFilter(val)}
+            >
+              <Option value="pending">待审批</Option>
+              <Option value="approved">已通过</Option>
+              <Option value="rejected">已拒绝</Option>
+              <Option value="cancelled">已取消</Option>
+            </Select>
+          </div>
+          {secondmentRequests.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#999', padding: '40px 0' }}>
+              暂无借调记录
+            </div>
+          ) : (
+            (secondmentStatusFilter ? secondmentRequests.filter(r => r.status === secondmentStatusFilter) : secondmentRequests).map(req => (
+              <div
+                key={req.id}
+                style={{
+                  border: '1px solid #e8e8e8',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  marginBottom: '12px',
+                  background: '#fafafa'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontWeight: '500', fontSize: '13px' }}>{req.from_department_name} → {req.to_department_name}</span>
+                  <Tag color={SECONMENT_STATUS[req.status].color}>
+                    {SECONMENT_STATUS[req.status].text}
+                  </Tag>
+                </div>
+                <div style={{ fontSize: '13px', color: '#666', marginBottom: '4px' }}>
+                  <div><strong>{req.nurse_name}</strong> ({req.nurse_level === 'senior' ? '资深' : '普通'})</div>
+                  <div>日期: {req.start_date} ~ {req.end_date}</div>
+                  {req.shifts && req.shifts !== 'all' && <div>班次: {req.shifts.split(',').map(s => SHIFT_NAMES[s]).join(', ')}</div>}
+                  {req.reason && <div style={{ fontSize: '12px', color: '#999' }}>原因: {req.reason}</div>}
+                </div>
+                {req.status === 'pending' && req.from_department_id === selectedDept?.id && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
+                    <Button size="small" type="primary" onClick={() => handleApproveSecondment(req.id)}>
+                      同意借出
+                    </Button>
+                    <Button size="small" danger onClick={() => handleRejectSecondment(req.id)}>
+                      拒绝
+                    </Button>
+                  </div>
+                )}
+                {req.status === 'approved' && (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '8px' }}>
+                    <Popconfirm title="确定取消此借调?" onConfirm={() => handleCancelSecondment(req.id)}>
+                      <Button size="small" danger>取消借调</Button>
+                    </Popconfirm>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )
     }
   ];
 
@@ -1311,6 +1580,10 @@ function SchedulePage() {
                 <div style={{ width: '16px', height: '16px', background: '#fa8c16', borderRadius: '2px' }}></div>
                 <span>疲劳预警</span>
               </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <div style={{ width: '16px', height: '16px', background: '#722ed1', borderRadius: '2px', border: '2px dashed #722ed1' }}></div>
+                <span>借调</span>
+              </div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
@@ -1326,6 +1599,13 @@ function SchedulePage() {
               setOvertimeModalVisible(true);
             }}>
               申请加班
+            </Button>
+            <Button onClick={() => {
+              secondmentForm.resetFields();
+              setFromDeptNurses([]);
+              setSecondmentModalVisible(true);
+            }}>
+              发起借调
             </Button>
             <Button type="primary" loading={loading} onClick={handleGenerateSchedule}>
               生成排班
@@ -1359,14 +1639,19 @@ function SchedulePage() {
                     {nurses.map(nurse => {
                       const isFatigue = fatigueMap[nurse.id]?.is_fatigue_warning;
                       const fatigueHours = fatigueMap[nurse.id]?.total_hours;
+                      const nurseSecondment = scheduleSecondments.find(s => s.nurse_id === nurse.id);
+                      const isLentOut = !!nurseSecondment;
                       return (
                         <tr key={nurse.id}>
-                          <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left', background: isFatigue ? '#fff7e6' : 'transparent' }}>
-                            <Tooltip title={isFatigue ? `近7日累计${fatigueHours}小时` : ''}>
-                              <span style={{ color: isFatigue ? '#fa8c16' : 'inherit', fontWeight: isFatigue ? '600' : 'normal' }}>
+                          <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left', background: isFatigue ? '#fff7e6' : (isLentOut ? '#f9f0ff' : 'transparent') }}>
+                            <Tooltip title={isFatigue ? `近7日累计${fatigueHours}小时` : (isLentOut ? `借调至${nurseSecondment.to_department_name || '其他科室'}` : '')}>
+                              <span style={{ color: isFatigue ? '#fa8c16' : (isLentOut ? '#722ed1' : 'inherit'), fontWeight: isFatigue || isLentOut ? '600' : 'normal' }}>
                                 {nurse.name}
                               </span>
                             </Tooltip>
+                            {isLentOut && (
+                              <Tag color="purple" style={{ fontSize: '10px', padding: '0 4px', lineHeight: '16px', marginTop: '2px', display: 'inline-block' }}>外借</Tag>
+                            )}
                             <div style={{ fontSize: '12px', color: nurse.level === 'senior' ? '#fa8c16' : '#999' }}>
                               {nurse.level === 'senior' ? '资深' : '普通'}
                             </div>
@@ -1394,6 +1679,7 @@ function SchedulePage() {
 
                             const isLeave = leave && shift;
                             const isSubstitute = subInfo && !isLeave;
+                            const isSecondmentShift = shift && shift.is_secondment;
 
                             return (
                               <td 
@@ -1403,7 +1689,7 @@ function SchedulePage() {
                                   padding: '4px', 
                                   textAlign: 'center', 
                                   verticalAlign: 'top',
-                                  background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : (isFatigue ? '#fffbe6' : 'transparent'))
+                                  background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : (isFatigue ? '#fffbe6' : (isLentOut ? '#f9f0ff' : 'transparent')))
                                 }}
                               >
                                 {shift && !isSubstitute && (
@@ -1413,14 +1699,16 @@ function SchedulePage() {
                                       borderRadius: '4px', 
                                       color: '#fff', 
                                       fontSize: '12px',
-                                      background: isLeave ? '#ff4d4f' : SHIFT_COLORS[shift.shift],
+                                      background: isLeave ? '#ff4d4f' : (isSecondmentShift ? '#722ed1' : SHIFT_COLORS[shift.shift]),
                                       marginBottom: '4px',
                                       cursor: 'pointer',
-                                      textDecoration: isLeave ? 'line-through' : 'none'
+                                      textDecoration: isLeave ? 'line-through' : 'none',
+                                      border: isSecondmentShift ? '2px dashed #531dab' : 'none'
                                     }}
                                     onClick={() => handleCellClick(nurse, dateStr, shift.shift, shift.id)}
                                   >
                                     {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : SHIFT_NAMES[shift.shift]}
+                                    {isSecondmentShift && !isLeave && <span style={{ marginLeft: '2px', fontSize: '10px' }}>借</span>}
                                     {shiftSkillReqs.filter(r => r.shift === shift.shift).length > 0 && !isLeave && (
                                       <Tooltip title={`技能要求: ${shiftSkillReqs.filter(r => r.shift === shift.shift).map(r => r.skill_name).join(', ')}`}>
                                         <span style={{ marginLeft: '4px', fontSize: '10px' }}>🔧</span>
@@ -2056,6 +2344,79 @@ function SchedulePage() {
             />
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        title="发起借调申请"
+        open={secondmentModalVisible}
+        onOk={handleSecondmentSubmit}
+        onCancel={() => { setSecondmentModalVisible(false); setFromDeptNurses([]); }}
+        okText="提交"
+        cancelText="取消"
+        width={550}
+      >
+        <Form form={secondmentForm} layout="vertical">
+          <Form.Item label="借入科室" style={{ marginBottom: '8px' }}>
+            <Input value={selectedDept?.name} disabled />
+          </Form.Item>
+          <Form.Item
+            name="from_department_id"
+            label="借出科室"
+            rules={[{ required: true, message: '请选择借出科室' }]}
+            style={{ marginBottom: '16px' }}
+          >
+            <Select
+              placeholder="请选择借出科室"
+              onChange={handleFromDeptChange}
+            >
+              {departments.filter(d => d.id !== selectedDept?.id).map(dept => (
+                <Option key={dept.id} value={dept.id}>{dept.name}</Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item
+            name="nurse_id"
+            label="借入护士"
+            rules={[{ required: true, message: '请选择借入护士' }]}
+            style={{ marginBottom: '16px' }}
+          >
+            <Select
+              placeholder={fromDeptNurses.length > 0 ? '请选择护士' : '请先选择借出科室'}
+              disabled={fromDeptNurses.length === 0}
+            >
+              {fromDeptNurses.map(n => (
+                <Option key={n.id} value={n.id}>
+                  {n.name} ({n.level === 'senior' ? '资深' : '普通'})
+                </Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item
+            name="date_range"
+            label="借调日期范围"
+            rules={[{ required: true, message: '请选择借调日期范围' }]}
+            style={{ marginBottom: '16px' }}
+          >
+            <RangePicker style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="shifts"
+            label="借调班次"
+            style={{ marginBottom: '16px' }}
+          >
+            <Select placeholder="默认所有班次" allowClear>
+              <Option value="all">所有班次</Option>
+              <Option value="morning">仅早班</Option>
+              <Option value="afternoon">仅中班</Option>
+              <Option value="night">仅夜班</Option>
+              <Option value="morning,afternoon">早班+中班</Option>
+              <Option value="afternoon,night">中班+夜班</Option>
+            </Select>
+          </Form.Item>
+          <Form.Item name="reason" label="借调原因">
+            <TextArea rows={3} placeholder="请输入借调原因（可选）" />
+          </Form.Item>
+        </Form>
       </Modal>
     </Layout>
   );

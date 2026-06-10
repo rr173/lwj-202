@@ -6,6 +6,7 @@ const { generateSchedule, validateScheduleChange, getDaysInMonth } = require('./
 const trainingRouter = require('./training');
 const adverseEventRouter = require('./adverseEvent');
 const handoverRouter = require('./handover');
+const secondmentRouter = require('./secondment');
 
 const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
 const FATIGUE_THRESHOLD = 48;
@@ -447,6 +448,7 @@ app.get('/api/departments/:id/skill-coverage-report', (req, res) => {
 app.use('/api', trainingRouter);
 app.use('/api', adverseEventRouter);
 app.use('/api', handoverRouter);
+app.use('/api', secondmentRouter);
 
 app.get('/api/departments', (req, res) => {
   db.all('SELECT * FROM departments ORDER BY id', [], (err, rows) => {
@@ -541,8 +543,8 @@ app.get('/api/departments/:id/schedule', (req, res) => {
   const { id } = req.params;
   const { month } = req.query;
   const query = month 
-    ? 'SELECT s.*, n.name as nurse_name, n.level FROM schedules s JOIN nurses n ON s.nurse_id = n.id WHERE s.department_id = ? AND s.month = ? ORDER BY s.date, s.shift'
-    : 'SELECT s.*, n.name as nurse_name, n.level FROM schedules s JOIN nurses n ON s.nurse_id = n.id WHERE s.department_id = ? ORDER BY s.date, s.shift';
+    ? 'SELECT s.*, n.name as nurse_name, n.level, n.department_id as nurse_original_dept FROM schedules s JOIN nurses n ON s.nurse_id = n.id WHERE s.department_id = ? AND s.month = ? ORDER BY s.date, s.shift'
+    : 'SELECT s.*, n.name as nurse_name, n.level, n.department_id as nurse_original_dept FROM schedules s JOIN nurses n ON s.nurse_id = n.id WHERE s.department_id = ? ORDER BY s.date, s.shift';
   const params = month ? [id, month] : [id];
   
   db.all(query, params, (err, rows) => {
@@ -550,12 +552,43 @@ app.get('/api/departments/:id/schedule', (req, res) => {
       return res.status(500).json({ error: err.message });
     }
 
-    db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ? ORDER BY ssr.shift', [id], (err, requirements) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
+    const secondmentCondition = month
+      ? `sr.status = 'approved' AND sr.to_department_id = ? AND sr.start_date <= ? AND sr.end_date >= ?`
+      : `sr.status = 'approved' AND sr.to_department_id = ?`;
+    const secondmentParams = month
+      ? [id, `${month}-31`, `${month}-01`]
+      : [id];
+
+    db.all(
+      `SELECT sr.nurse_id, sr.start_date, sr.end_date, sr.from_department_id, fd.name as from_department_name
+       FROM secondment_requests sr
+       JOIN departments fd ON sr.from_department_id = fd.id
+       WHERE ${secondmentCondition}`,
+      secondmentParams,
+      (err, secondments) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+
+        const secondmentMap = {};
+        secondments.forEach(s => {
+          secondmentMap[s.nurse_id] = s;
+        });
+
+        const enrichedRows = rows.map(r => ({
+          ...r,
+          is_secondment: r.nurse_original_dept !== parseInt(id) || !!secondmentMap[r.nurse_id],
+          secondment_info: secondmentMap[r.nurse_id] || null
+        }));
+
+        db.all('SELECT ssr.shift, ssr.skill_id, st.name as skill_name FROM shift_skill_requirements ssr JOIN skill_tags st ON ssr.skill_id = st.id WHERE ssr.department_id = ? ORDER BY ssr.shift', [id], (err, requirements) => {
+          if (err) {
+            return res.status(500).json({ error: err.message });
+          }
+          res.json({ schedules: enrichedRows, shift_skill_requirements: requirements, secondments });
+        });
       }
-      res.json({ schedules: rows, shift_skill_requirements: requirements });
-    });
+    );
   });
 });
 
@@ -1071,6 +1104,10 @@ app.get('/api/departments/:id/monthly-report', (req, res) => {
   if (!month) {
     return res.status(400).json({ error: '请提供月份参数' });
   }
+
+  const [year, monthNum] = month.split('-').map(Number);
+  const monthStart = `${year}-${String(monthNum).padStart(2, '0')}-01`;
+  const monthEnd = dayjs(monthStart).endOf('month').format('YYYY-MM-DD');
   
   db.all('SELECT * FROM nurses WHERE department_id = ?', [id], (err, nurses) => {
     if (err) {
@@ -1108,37 +1145,94 @@ app.get('/api/departments/:id/monthly-report', (req, res) => {
                     if (err) {
                       return res.status(500).json({ error: err.message });
                     }
-                    
-                    const report = nurses.map(nurse => {
-                      const scheduleStat = scheduleCounts.find(s => s.nurse_id === nurse.id) || { shift_count: 0 };
-                      const overtimeStat = overtimeStats.find(o => o.nurse_id === nurse.id) || { overtime_count: 0, overtime_hours: 0 };
-                      const leaveStat = leaveStats.find(l => l.nurse_id === nurse.id) || { leave_count: 0 };
-                      const subStat = subStats.find(s => s.substitute_nurse_id === nurse.id) || { substitute_count: 0 };
-                      
-                      const leave_count = leaveStat.leave_count || 0;
-                      const substitute_shifts = subStat.substitute_count || 0;
-                      const normal_hours = (scheduleStat.shift_count - leave_count) * 8;
-                      const substitute_hours = substitute_shifts * 8;
-                      const overtime_hours = Math.round((overtimeStat.overtime_hours || 0) * 100) / 100;
-                      const total_hours = Math.round((normal_hours + substitute_hours + overtime_hours) * 100) / 100;
-                      
-                      return {
-                        nurse_id: nurse.id,
-                        nurse_name: nurse.name,
-                        nurse_level: nurse.level,
-                        normal_shift_count: scheduleStat.shift_count,
-                        leave_count,
-                        substitute_shifts,
-                        effective_shift_count: scheduleStat.shift_count - leave_count + substitute_shifts,
-                        overtime_count: overtimeStat.overtime_count,
-                        normal_hours,
-                        substitute_hours,
-                        overtime_hours,
-                        total_hours
-                      };
-                    });
-                    
-                    res.json(report);
+
+                    db.all(
+                      `SELECT sr.*, n.name as nurse_name, n.level as nurse_level,
+                              fd.name as from_department_name,
+                              td.name as to_department_name
+                       FROM secondment_requests sr
+                       JOIN nurses n ON sr.nurse_id = n.id
+                       JOIN departments fd ON sr.from_department_id = fd.id
+                       JOIN departments td ON sr.to_department_id = td.id
+                       WHERE sr.status = 'approved'
+                       AND ((sr.from_department_id = ? OR sr.to_department_id = ?)
+                       AND sr.start_date <= ? AND sr.end_date >= ?)
+                       ORDER BY n.name`,
+                      [id, id, monthEnd, monthStart],
+                      (err, secondments) => {
+                        if (err) {
+                          return res.status(500).json({ error: err.message });
+                        }
+
+                        const borrowedSecondments = secondments.filter(s => s.to_department_id === parseInt(id));
+                        const lentOutSecondments = secondments.filter(s => s.from_department_id === parseInt(id));
+                        const lentOutNurseIds = new Set(lentOutSecondments.map(s => s.nurse_id));
+
+                        const report = nurses.map(nurse => {
+                          const scheduleStat = scheduleCounts.find(s => s.nurse_id === nurse.id) || { shift_count: 0 };
+                          const overtimeStat = overtimeStats.find(o => o.nurse_id === nurse.id) || { overtime_count: 0, overtime_hours: 0 };
+                          const leaveStat = leaveStats.find(l => l.nurse_id === nurse.id) || { leave_count: 0 };
+                          const subStat = subStats.find(s => s.substitute_nurse_id === nurse.id) || { substitute_count: 0 };
+                          
+                          const leave_count = leaveStat.leave_count || 0;
+                          const substitute_shifts = subStat.substitute_count || 0;
+                          const normal_hours = (scheduleStat.shift_count - leave_count) * 8;
+                          const substitute_hours = substitute_shifts * 8;
+                          const overtime_hours = Math.round((overtimeStat.overtime_hours || 0) * 100) / 100;
+                          const total_hours = Math.round((normal_hours + substitute_hours + overtime_hours) * 100) / 100;
+
+                          const isLentOut = lentOutNurseIds.has(nurse.id);
+                          const lentOutInfo = lentOutSecondments.find(s => s.nurse_id === nurse.id);
+                          
+                          return {
+                            nurse_id: nurse.id,
+                            nurse_name: nurse.name,
+                            nurse_level: nurse.level,
+                            nurse_type: isLentOut ? 'lent_out' : 'own',
+                            lent_out_to: isLentOut ? lentOutInfo.to_department_name : null,
+                            lent_out_period: isLentOut ? `${lentOutInfo.start_date} ~ ${lentOutInfo.end_date}` : null,
+                            normal_shift_count: scheduleStat.shift_count,
+                            leave_count,
+                            substitute_shifts,
+                            effective_shift_count: scheduleStat.shift_count - leave_count + substitute_shifts,
+                            overtime_count: overtimeStat.overtime_count,
+                            normal_hours,
+                            substitute_hours,
+                            overtime_hours,
+                            total_hours
+                          };
+                        });
+
+                        const borrowedReport = borrowedSecondments.map(sec => {
+                          const scheduleStat = scheduleCounts.find(s => s.nurse_id === sec.nurse_id) || { shift_count: 0 };
+                          const overtimeStat = overtimeStats.find(o => o.nurse_id === sec.nurse_id) || { overtime_count: 0, overtime_hours: 0 };
+                          
+                          const normal_hours = (scheduleStat.shift_count) * 8;
+                          const overtime_hours = Math.round((overtimeStat.overtime_hours || 0) * 100) / 100;
+                          const total_hours = Math.round((normal_hours + overtime_hours) * 100) / 100;
+
+                          return {
+                            nurse_id: sec.nurse_id,
+                            nurse_name: sec.nurse_name,
+                            nurse_level: sec.nurse_level,
+                            nurse_type: 'borrowed',
+                            borrowed_from: sec.from_department_name,
+                            borrowed_period: `${sec.start_date} ~ ${sec.end_date}`,
+                            normal_shift_count: scheduleStat.shift_count,
+                            leave_count: 0,
+                            substitute_shifts: 0,
+                            effective_shift_count: scheduleStat.shift_count,
+                            overtime_count: overtimeStat.overtime_count || 0,
+                            normal_hours,
+                            substitute_hours: 0,
+                            overtime_hours,
+                            total_hours
+                          };
+                        });
+
+                        res.json([...report, ...borrowedReport]);
+                      }
+                    );
                   });
               });
           });
