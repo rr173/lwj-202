@@ -269,27 +269,37 @@ function getNextVersionNumber(db, departmentId, month) {
   });
 }
 
-function createScheduleVersion(db, departmentId, month, operationType, operatorId, operatorName, remark) {
+function createScheduleVersion(db, departmentId, month, operationType, operatorId, operatorName, remark, prebuiltSnapshot) {
   return new Promise((resolve, reject) => {
-    db.all(
-      'SELECT id, department_id, nurse_id, date, shift, month FROM schedules WHERE department_id = ? AND month = ? ORDER BY date, nurse_id',
-      [departmentId, month],
-      (err, schedules) => {
-        if (err) return reject(err);
-        const snapshot = JSON.stringify(schedules);
-        getNextVersionNumber(db, departmentId, month).then(versionNumber => {
-          db.run(
-            `INSERT INTO schedule_versions (department_id, month, version_number, operation_type, operator_id, operator_name, remark, snapshot)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [departmentId, month, versionNumber, operationType, operatorId || null, operatorName || null, remark || null, snapshot],
-            function(err) {
-              if (err) return reject(err);
-              resolve({ id: this.lastID, version_number: versionNumber });
-            }
-          );
-        }).catch(reject);
-      }
-    );
+    const saveVersion = (snapshotJson) => {
+      getNextVersionNumber(db, departmentId, month).then(versionNumber => {
+        db.run(
+          `INSERT INTO schedule_versions (department_id, month, version_number, operation_type, operator_id, operator_name, remark, snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [departmentId, month, versionNumber, operationType, operatorId || null, operatorName || null, remark || null, snapshotJson],
+          function(err) {
+            if (err) return reject(err);
+            resolve({ id: this.lastID, version_number: versionNumber });
+          }
+        );
+      }).catch(reject);
+    };
+
+    if (prebuiltSnapshot !== undefined && prebuiltSnapshot !== null) {
+      const snapshotJson = typeof prebuiltSnapshot === 'string'
+        ? prebuiltSnapshot
+        : JSON.stringify(prebuiltSnapshot);
+      saveVersion(snapshotJson);
+    } else {
+      db.all(
+        'SELECT id, department_id, nurse_id, date, shift, month FROM schedules WHERE department_id = ? AND month = ? ORDER BY date, nurse_id',
+        [departmentId, month],
+        (err, schedules) => {
+          if (err) return reject(err);
+          saveVersion(JSON.stringify(schedules));
+        }
+      );
+    }
   });
 }
 
@@ -396,6 +406,8 @@ function findConflictingSwapAndSubstitute(db, departmentId, month, targetVersion
       substitute_conflicts: []
     };
 
+    const monthPrefix = month + '-';
+
     db.all(
       `SELECT sr.*, 
               r.name as requester_name, 
@@ -403,9 +415,10 @@ function findConflictingSwapAndSubstitute(db, departmentId, month, targetVersion
        FROM swap_requests sr
        JOIN nurses r ON sr.requester_id = r.id
        JOIN nurses t ON sr.target_id = t.id
-       WHERE sr.department_id = ? AND sr.status = 'approved' AND sr.created_at > ?
+       WHERE sr.department_id = ? AND sr.status = 'approved' 
+         AND sr.created_at > ? AND sr.date LIKE ?
        ORDER BY sr.created_at DESC`,
-      [departmentId, targetVersionCreatedAt],
+      [departmentId, targetVersionCreatedAt, monthPrefix + '%'],
       (err, swaps) => {
         if (err) return reject(err);
         result.swap_conflicts = swaps;
@@ -416,9 +429,10 @@ function findConflictingSwapAndSubstitute(db, departmentId, month, targetVersion
            JOIN nurses n ON lr.nurse_id = n.id
            LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
            WHERE lr.department_id = ? AND lr.status = 'approved' 
-           AND lr.substitute_status = 'confirmed' AND lr.created_at > ?
+             AND lr.substitute_status = 'confirmed' AND lr.created_at > ?
+             AND lr.date LIKE ?
            ORDER BY lr.created_at DESC`,
-          [departmentId, targetVersionCreatedAt],
+          [departmentId, targetVersionCreatedAt, monthPrefix + '%'],
           (err, subs) => {
             if (err) return reject(err);
             result.substitute_conflicts = subs;
@@ -2233,7 +2247,7 @@ app.post('/api/departments/:id/schedule-versions/:versionId/rollback', (req, res
               if (err) {
                 return res.status(500).json({ error: err.message });
               }
-              createScheduleVersion(db, id, month, 'version_rollback', null, '管理员', `回溯至V${targetVersion.version_number}版本`)
+              createScheduleVersion(db, id, month, 'version_rollback', null, '管理员', `回溯至V${targetVersion.version_number}版本`, targetVersion.snapshot)
                 .then(versionInfo => {
                   res.json({
                     success: true,
@@ -2268,7 +2282,7 @@ app.post('/api/departments/:id/schedule-versions/:versionId/rollback', (req, res
                     if (commitErr) {
                       return res.status(500).json({ error: commitErr.message });
                     }
-                    createScheduleVersion(db, id, month, 'version_rollback', null, '管理员', `回溯至V${targetVersion.version_number}版本`)
+                    createScheduleVersion(db, id, month, 'version_rollback', null, '管理员', `回溯至V${targetVersion.version_number}版本`, targetVersion.snapshot)
                       .then(versionInfo => {
                         res.json({
                           success: true,
