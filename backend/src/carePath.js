@@ -68,7 +68,8 @@ async function scanOverdueWarnings() {
             const overdueMinutes = now.diff(deadline, 'minute');
             const existing = await getAsync(`
               SELECT * FROM care_path_warnings
-              WHERE operation_execution_id = ? AND is_handled = 0
+              WHERE operation_execution_id = ?
+              ORDER BY id DESC LIMIT 1
             `, [op.id]);
 
             if (!existing) {
@@ -76,7 +77,7 @@ async function scanOverdueWarnings() {
                 INSERT INTO care_path_warnings (patient_path_id, department_id, operation_execution_id, patient_bed, operation_name, overdue_minutes)
                 VALUES (?, ?, ?, ?, ?, ?)
               `, [path.id, path.department_id, op.id, path.patient_bed, op.operation_name, overdueMinutes]);
-            } else {
+            } else if (existing.is_handled === 0) {
               await runAsync(`
                 UPDATE care_path_warnings SET overdue_minutes = ? WHERE id = ?
               `, [overdueMinutes, existing.id]);
@@ -441,7 +442,7 @@ router.post('/care-path-operation-executions/:id/sign', async (req, res) => {
 
   try {
     const opExec = await getAsync(`
-      SELECT coe.*, cse.patient_path_id, cse.stage_index, cse.stage_id, pcp.department_id, pcp.patient_bed
+      SELECT coe.*, cse.patient_path_id, cse.stage_index, cse.stage_id, cse.status as stage_status, pcp.department_id, pcp.patient_bed
       FROM care_path_operation_executions coe
       JOIN care_path_stage_executions cse ON coe.stage_execution_id = cse.id
       JOIN patient_care_paths pcp ON cse.patient_path_id = pcp.id
@@ -449,6 +450,9 @@ router.post('/care-path-operation-executions/:id/sign', async (req, res) => {
     `, [id]);
     if (!opExec) return res.status(404).json({ error: '操作项不存在' });
     if (opExec.status === 'completed') return res.status(400).json({ error: '该操作项已签署完成' });
+    if (opExec.stage_status !== 'in_progress') {
+      return res.status(400).json({ error: '该操作项所在阶段尚未开始，无法签署，请按顺序完成当前阶段' });
+    }
 
     const today = dayjs().format('YYYY-MM-DD');
     const schedule = await getAsync(`
