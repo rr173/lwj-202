@@ -99,7 +99,41 @@ function checkDaySkillCoverage(dayShifts, nurseSkillMap, shiftReqs) {
   return missing;
 }
 
-function generateSchedule(departmentId, nurses, month, unavailableDatesList = [], nurseSkillsList = [], shiftRequirementsList = []) {
+function buildNursePreferenceMap(preferencesList) {
+  const map = {};
+  preferencesList.forEach(p => {
+    try {
+      map[p.nurse_id] = {
+        restDates: new Set(JSON.parse(p.rest_dates || '[]')),
+        workDates: new Set(JSON.parse(p.work_dates || '[]')),
+        preferredShifts: new Set(JSON.parse(p.preferred_shifts || '[]'))
+      };
+    } catch (e) {
+      map[p.nurse_id] = { restDates: new Set(), workDates: new Set(), preferredShifts: new Set() };
+    }
+  });
+  return map;
+}
+
+function calculatePreferenceScore(nurseId, date, shift, preferenceMap) {
+  let score = 0;
+  const pref = preferenceMap[nurseId];
+  if (!pref) return score;
+
+  if (pref.restDates.has(date)) {
+    score -= 100;
+  }
+  if (pref.workDates.has(date)) {
+    score += 50;
+  }
+  if (pref.preferredShifts.has(shift)) {
+    score += 30;
+  }
+
+  return score;
+}
+
+function generateSchedule(departmentId, nurses, month, unavailableDatesList = [], nurseSkillsList = [], shiftRequirementsList = [], preferencesList = []) {
   const [year, monthNum] = month.split('-').map(Number);
   const days = getDaysInMonth(year, monthNum);
   
@@ -120,6 +154,7 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
 
   const nurseSkillMap = buildNurseSkillMap(nurseSkillsList);
   const shiftReqs = buildShiftRequirementsMap(shiftRequirementsList);
+  const preferenceMap = buildNursePreferenceMap(preferencesList);
 
   const existingShifts = {};
   const shiftCounts = {};
@@ -155,11 +190,13 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
           requiredSkills.forEach(req => {
             if (nurseSkills.has(req.skill_id)) coveredCount++;
           });
-          return { nurse: n, coveredCount, shiftCount: shiftCounts[n.id] || 0 };
+          const prefScore = calculatePreferenceScore(n.id, date, shift, preferenceMap);
+          return { nurse: n, coveredCount, shiftCount: shiftCounts[n.id] || 0, prefScore };
         });
 
         scored.sort((a, b) => {
           if (b.coveredCount !== a.coveredCount) return b.coveredCount - a.coveredCount;
+          if (b.prefScore !== a.prefScore) return b.prefScore - a.prefScore;
           return a.shiftCount - b.shiftCount;
         });
 
@@ -181,24 +218,29 @@ function generateSchedule(departmentId, nurses, month, unavailableDatesList = []
           assigned = true;
         }
       } else {
-        const sorted = candidates.sort((a, b) => {
-          const countA = shiftCounts[a.id] || 0;
-          const countB = shiftCounts[b.id] || 0;
-          return countA - countB;
+        const scored = candidates.map(n => ({
+          nurse: n,
+          shiftCount: shiftCounts[n.id] || 0,
+          prefScore: calculatePreferenceScore(n.id, date, shift, preferenceMap)
+        }));
+
+        scored.sort((a, b) => {
+          if (b.prefScore !== a.prefScore) return b.prefScore - a.prefScore;
+          return a.shiftCount - b.shiftCount;
         });
 
-        for (const nurse of sorted) {
+        for (const item of scored) {
           dayShifts.push({
             department_id: departmentId,
-            nurse_id: nurse.id,
+            nurse_id: item.nurse.id,
             date: date,
             shift: shift,
             month: month
           });
-          existingShifts[nurse.id][date] = shift;
-          shiftCounts[nurse.id]++;
-          usedNurses.add(nurse.id);
-          if (nurse.level === 'senior') {
+          existingShifts[item.nurse.id][date] = shift;
+          shiftCounts[item.nurse.id]++;
+          usedNurses.add(item.nurse.id);
+          if (item.nurse.level === 'senior') {
             hasSenior = true;
           }
           assigned = true;

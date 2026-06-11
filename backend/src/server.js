@@ -922,42 +922,87 @@ app.post('/api/departments/:id/generate-schedule', (req, res) => {
                 return res.status(500).json({ error: err.message });
               }
 
-              const result = generateSchedule(id, nurses, month, unavailableDates, nurseSkills, shiftRequirements);
+              db.all(
+                'SELECT * FROM schedule_preferences WHERE department_id = ? AND month = ?',
+                [id, month],
+                (err, preferences) => {
+                  if (err) {
+                    return res.status(500).json({ error: err.message });
+                  }
 
-              if (!result.success) {
-                return res.status(400).json({ error: result.reason });
-              }
+                  const result = generateSchedule(id, nurses, month, unavailableDates, nurseSkills, shiftRequirements, preferences);
 
-              db.run('DELETE FROM schedules WHERE department_id = ? AND month = ?', [id, month], function(err) {
-                if (err) {
-                  return res.status(500).json({ error: err.message });
-                }
+                  if (!result.success) {
+                    return res.status(400).json({ error: result.reason });
+                  }
 
-                const stmt = db.prepare('INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)');
-                result.schedule.forEach(s => {
-                  stmt.run(s.department_id, s.nurse_id, s.date, s.shift, s.month);
+                  db.run('DELETE FROM schedules WHERE department_id = ? AND month = ?', [id, month], function(err) {
+                    if (err) {
+                      return res.status(500).json({ error: err.message });
+                    }
+
+                    const stmt = db.prepare('INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)');
+                    result.schedule.forEach(s => {
+                      stmt.run(s.department_id, s.nurse_id, s.date, s.shift, s.month);
+                    });
+                stmt.finalize((err) => {
+                  if (err) {
+                    return res.status(500).json({ error: err.message });
+                  }
+                  createScheduleVersion(db, id, month, 'auto_generate', null, '系统', '自动生成排班')
+                    .catch(err => console.error('保存版本快照失败:', err.message))
+                    .finally(() => {
+                      calculatePreferenceSatisfaction(db, id, month).then(satResults => {
+                        savePreferenceSatisfactionBatch(db, satResults).catch(err => console.error('保存偏好满足率失败:', err.message));
+                        const avgSatRate = satResults.length > 0
+                          ? Math.round((satResults.reduce((sum, r) => sum + r.satisfaction_rate, 0) / satResults.length) * 100) / 100
+                          : 0;
+                        return { satResults, avgSatRate };
+                      }).then(({ satResults, avgSatRate }) => {
+                        const today = dayjs().format('YYYY-MM-DD');
+                        compute7DayHours(db, id, today).then(fatigueData => {
+                          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                          res.json({
+                            success: true,
+                            schedule: result.schedule,
+                            shiftCounts: result.shiftCounts,
+                            fatigue_warnings,
+                            skill_warnings: result.skillWarnings || [],
+                            preference_satisfaction: {
+                              average_rate: avgSatRate,
+                              nurses_count: satResults.length
+                            }
+                          });
+                        }).catch(() => {
+                          res.json({
+                            success: true,
+                            schedule: result.schedule,
+                            shiftCounts: result.shiftCounts,
+                            fatigue_warnings: [],
+                            skill_warnings: result.skillWarnings || [],
+                            preference_satisfaction: {
+                              average_rate: avgSatRate,
+                              nurses_count: satResults.length
+                            }
+                          });
+                        });
+                      }).catch(() => {
+                        const today = dayjs().format('YYYY-MM-DD');
+                        compute7DayHours(db, id, today).then(fatigueData => {
+                          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                          res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings, skill_warnings: result.skillWarnings || [] });
+                        }).catch(() => {
+                          res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings: [], skill_warnings: result.skillWarnings || [] });
+                        });
+                      });
+                    });
                 });
-            stmt.finalize((err) => {
-              if (err) {
-                return res.status(500).json({ error: err.message });
-              }
-              createScheduleVersion(db, id, month, 'auto_generate', null, '系统', '自动生成排班')
-                .catch(err => console.error('保存版本快照失败:', err.message))
-                .finally(() => {
-                  const today = dayjs().format('YYYY-MM-DD');
-                  compute7DayHours(db, id, today).then(fatigueData => {
-                    const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
-                    res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings, skill_warnings: result.skillWarnings || [] });
-                  }).catch(() => {
-                    res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings: [], skill_warnings: result.skillWarnings || [] });
-                  });
-                });
+              });
             });
           });
         });
       });
     });
-  });
   });
 });
 
@@ -2303,6 +2348,376 @@ app.post('/api/departments/:id/schedule-versions/:versionId/rollback', (req, res
         });
       });
     }).catch(err => res.status(500).json({ error: err.message }));
+  }).catch(err => res.status(500).json({ error: err.message }));
+});
+
+function calculatePreferenceSatisfaction(db, departmentId, month) {
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT sp.*, n.name as nurse_name
+       FROM schedule_preferences sp
+       JOIN nurses n ON sp.nurse_id = n.id
+       WHERE sp.department_id = ? AND sp.month = ?`,
+      [departmentId, month],
+      (err, preferences) => {
+        if (err) return reject(err);
+
+        db.all(
+          'SELECT nurse_id, date, shift FROM schedules WHERE department_id = ? AND month = ?',
+          [departmentId, month],
+          (err, schedules) => {
+            if (err) return reject(err);
+
+            const scheduleMap = {};
+            schedules.forEach(s => {
+              if (!scheduleMap[s.nurse_id]) scheduleMap[s.nurse_id] = {};
+              scheduleMap[s.nurse_id][s.date] = s.shift;
+            });
+
+            const results = [];
+
+            preferences.forEach(pref => {
+              let restDates = [];
+              let workDates = [];
+              let preferredShifts = [];
+              try {
+                restDates = JSON.parse(pref.rest_dates || '[]');
+                workDates = JSON.parse(pref.work_dates || '[]');
+                preferredShifts = JSON.parse(pref.preferred_shifts || '[]');
+              } catch (e) {}
+
+              const nurseSchedules = scheduleMap[pref.nurse_id] || {};
+              const satisfiedDetails = [];
+              let totalCount = 0;
+              let satisfiedCount = 0;
+
+              restDates.forEach(date => {
+                totalCount++;
+                const satisfied = !nurseSchedules[date];
+                if (satisfied) satisfiedCount++;
+                satisfiedDetails.push({
+                  type: 'rest',
+                  date,
+                  satisfied,
+                  actual: nurseSchedules[date] ? SHIFT_NAMES[nurseSchedules[date]] : '休息'
+                });
+              });
+
+              workDates.forEach(date => {
+                totalCount++;
+                const satisfied = !!nurseSchedules[date];
+                if (satisfied) satisfiedCount++;
+                satisfiedDetails.push({
+                  type: 'work',
+                  date,
+                  satisfied,
+                  actual: nurseSchedules[date] ? SHIFT_NAMES[nurseSchedules[date]] : '休息'
+                });
+              });
+
+              if (preferredShifts.length > 0) {
+                Object.keys(nurseSchedules).forEach(date => {
+                  totalCount++;
+                  const shift = nurseSchedules[date];
+                  const satisfied = preferredShifts.includes(shift);
+                  if (satisfied) satisfiedCount++;
+                  satisfiedDetails.push({
+                    type: 'shift',
+                    date,
+                    satisfied,
+                    actual: SHIFT_NAMES[shift],
+                    preferred: preferredShifts.map(s => SHIFT_NAMES[s]).join('/')
+                  });
+                });
+              }
+
+              const rate = totalCount > 0 ? Math.round((satisfiedCount / totalCount) * 10000) / 100 : 0;
+
+              results.push({
+                nurse_id: pref.nurse_id,
+                nurse_name: pref.nurse_name,
+                department_id: pref.department_id,
+                month,
+                total_preferences: totalCount,
+                satisfied_preferences: satisfiedCount,
+                satisfaction_rate: rate,
+                satisfied_details: satisfiedDetails,
+                rest_count: restDates.length,
+                work_count: workDates.length,
+                preferred_shift_count: preferredShifts.length
+              });
+            });
+
+            resolve(results);
+          }
+        );
+      }
+    );
+  });
+}
+
+function savePreferenceSatisfactionBatch(db, results) {
+  return new Promise((resolve, reject) => {
+    if (results.length === 0) return resolve();
+    db.serialize(() => {
+      db.run('BEGIN TRANSACTION');
+      let completed = 0;
+      let hasError = false;
+      results.forEach(r => {
+        db.run(
+          `INSERT INTO preference_satisfaction_records 
+           (nurse_id, department_id, month, total_preferences, satisfied_preferences, satisfaction_rate, satisfied_details)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(nurse_id, month) DO UPDATE SET
+             total_preferences = excluded.total_preferences,
+             satisfied_preferences = excluded.satisfied_preferences,
+             satisfaction_rate = excluded.satisfaction_rate,
+             satisfied_details = excluded.satisfied_details`,
+          [r.nurse_id, r.department_id, r.month, r.total_preferences, r.satisfied_preferences, r.satisfaction_rate, JSON.stringify(r.satisfied_details)],
+          (err) => {
+            if (err && !hasError) {
+              hasError = true;
+              db.run('ROLLBACK');
+              return reject(err);
+            }
+            completed++;
+            if (completed === results.length && !hasError) {
+              db.run('COMMIT', (commitErr) => {
+                if (commitErr) return reject(commitErr);
+                resolve();
+              });
+            }
+          }
+        );
+      });
+    });
+  });
+}
+
+app.get('/api/nurses/:id/preferences', (req, res) => {
+  const { id } = req.params;
+  const { month } = req.query;
+  if (!month) return res.status(400).json({ error: '请提供月份参数' });
+
+  db.get(
+    'SELECT * FROM schedule_preferences WHERE nurse_id = ? AND month = ?',
+    [id, month],
+    (err, row) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!row) {
+        return res.json({
+          nurse_id: parseInt(id),
+          month,
+          rest_dates: [],
+          work_dates: [],
+          preferred_shifts: []
+        });
+      }
+      try {
+        res.json({
+          ...row,
+          rest_dates: JSON.parse(row.rest_dates || '[]'),
+          work_dates: JSON.parse(row.work_dates || '[]'),
+          preferred_shifts: JSON.parse(row.preferred_shifts || '[]')
+        });
+      } catch (e) {
+        res.json({
+          ...row,
+          rest_dates: [],
+          work_dates: [],
+          preferred_shifts: []
+        });
+      }
+    }
+  );
+});
+
+app.put('/api/nurses/:id/preferences', (req, res) => {
+  const { id } = req.params;
+  const { month, rest_dates, work_dates, preferred_shifts } = req.body;
+
+  if (!month) return res.status(400).json({ error: '请提供月份' });
+  if (!Array.isArray(rest_dates)) return res.status(400).json({ error: 'rest_dates必须为数组' });
+  if (!Array.isArray(work_dates)) return res.status(400).json({ error: 'work_dates必须为数组' });
+  if (!Array.isArray(preferred_shifts)) return res.status(400).json({ error: 'preferred_shifts必须为数组' });
+
+  if (rest_dates.length > 5) {
+    return res.status(400).json({ error: '最多只能标记5天为"希望休息"' });
+  }
+  if (work_dates.length > 3) {
+    return res.status(400).json({ error: '最多只能标记3天为"希望上班"' });
+  }
+
+  const validShifts = new Set(['morning', 'afternoon', 'night']);
+  for (const s of preferred_shifts) {
+    if (!validShifts.has(s)) {
+      return res.status(400).json({ error: '无效的班次类型' });
+    }
+  }
+
+  const intersection = rest_dates.filter(d => work_dates.includes(d));
+  if (intersection.length > 0) {
+    return res.status(400).json({ error: '同一天不能同时标记为"希望休息"和"希望上班"' });
+  }
+
+  db.get('SELECT department_id FROM nurses WHERE id = ?', [id], (err, nurse) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!nurse) return res.status(404).json({ error: '护士不存在' });
+
+    db.run(
+      `INSERT INTO schedule_preferences 
+       (nurse_id, department_id, month, rest_dates, work_dates, preferred_shifts, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(nurse_id, month) DO UPDATE SET
+         rest_dates = excluded.rest_dates,
+         work_dates = excluded.work_dates,
+         preferred_shifts = excluded.preferred_shifts,
+         updated_at = CURRENT_TIMESTAMP`,
+      [id, nurse.department_id, month, JSON.stringify(rest_dates), JSON.stringify(work_dates), JSON.stringify(preferred_shifts)],
+      function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({
+          success: true,
+          nurse_id: parseInt(id),
+          department_id: nurse.department_id,
+          month,
+          rest_dates,
+          work_dates,
+          preferred_shifts
+        });
+      }
+    );
+  });
+});
+
+app.get('/api/departments/:id/preferences-summary', (req, res) => {
+  const { id } = req.params;
+  const { month } = req.query;
+  if (!month) return res.status(400).json({ error: '请提供月份参数' });
+
+  db.all(
+    `SELECT sp.*, n.name as nurse_name, n.level as nurse_level
+     FROM schedule_preferences sp
+     JOIN nurses n ON sp.nurse_id = n.id
+     WHERE sp.department_id = ? AND sp.month = ?
+     ORDER BY n.name`,
+    [id, month],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+
+      const preferences = rows.map(r => {
+        try {
+          return {
+            ...r,
+            rest_dates: JSON.parse(r.rest_dates || '[]'),
+            work_dates: JSON.parse(r.work_dates || '[]'),
+            preferred_shifts: JSON.parse(r.preferred_shifts || '[]')
+          };
+        } catch (e) {
+          return { ...r, rest_dates: [], work_dates: [], preferred_shifts: [] };
+        }
+      });
+
+      const restHeatmap = {};
+      const workHeatmap = {};
+
+      preferences.forEach(p => {
+        p.rest_dates.forEach(date => {
+          if (!restHeatmap[date]) restHeatmap[date] = { count: 0, nurses: [] };
+          restHeatmap[date].count++;
+          restHeatmap[date].nurses.push({ nurse_id: p.nurse_id, nurse_name: p.nurse_name });
+        });
+        p.work_dates.forEach(date => {
+          if (!workHeatmap[date]) workHeatmap[date] = { count: 0, nurses: [] };
+          workHeatmap[date].count++;
+          workHeatmap[date].nurses.push({ nurse_id: p.nurse_id, nurse_name: p.nurse_name });
+        });
+      });
+
+      const submitSummary = {
+        total_nurses: 0,
+        submitted_count: preferences.length,
+        submission_rate: 0
+      };
+
+      db.get('SELECT COUNT(*) as total FROM nurses WHERE department_id = ?', [id], (err, countRow) => {
+        if (err) return res.status(500).json({ error: err.message });
+        submitSummary.total_nurses = countRow.total || 0;
+        submitSummary.submission_rate = submitSummary.total_nurses > 0
+          ? Math.round((submitSummary.submitted_count / submitSummary.total_nurses) * 10000) / 100
+          : 0;
+
+        res.json({
+          month,
+          department_id: parseInt(id),
+          submit_summary: submitSummary,
+          preferences,
+          rest_heatmap: restHeatmap,
+          work_heatmap: workHeatmap
+        });
+      });
+    }
+  );
+});
+
+app.get('/api/departments/:id/preference-satisfaction', (req, res) => {
+  const { id } = req.params;
+  const { month } = req.query;
+  if (!month) return res.status(400).json({ error: '请提供月份参数' });
+
+  calculatePreferenceSatisfaction(db, id, month).then(results => {
+    const [year, monthNum] = month.split('-').map(Number);
+    const prevMonthDate = dayjs(`${year}-${String(monthNum).padStart(2, '0')}-01`).subtract(1, 'month');
+    const prevMonth = prevMonthDate.format('YYYY-MM');
+    const prevPrevMonth = prevMonthDate.subtract(1, 'month').format('YYYY-MM');
+
+    db.all(
+      `SELECT nurse_id, satisfaction_rate, month 
+       FROM preference_satisfaction_records 
+       WHERE department_id = ? AND month IN (?, ?)`,
+      [id, prevMonth, prevPrevMonth],
+      (err, prevRows) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        const prevRateMap = {};
+        prevRows.forEach(r => { prevRateMap[`${r.nurse_id}_${r.month}`] = r.satisfaction_rate; });
+
+        const enrichedResults = results.map(r => {
+          const prevRate = prevRateMap[`${r.nurse_id}_${prevMonth}`];
+          const prevPrevRate = prevRateMap[`${r.nurse_id}_${prevPrevMonth}`];
+          let need_attention = false;
+          let attention_reason = null;
+
+          if (prevRate !== undefined && prevPrevRate !== undefined) {
+            if (prevRate < 50 && prevPrevRate < 50) {
+              need_attention = true;
+              attention_reason = `连续两个月(${prevPrevMonth}月: ${prevPrevRate}%, ${prevMonth}月: ${prevRate}%)满足率低于50%`;
+            }
+          }
+
+          return {
+            ...r,
+            previous_month_rate: prevRate,
+            previous_prev_month_rate: prevPrevRate,
+            need_attention,
+            attention_reason
+          };
+        });
+
+        const needAttentionCount = enrichedResults.filter(r => r.need_attention).length;
+        const avgRate = enrichedResults.length > 0
+          ? Math.round((enrichedResults.reduce((sum, r) => sum + r.satisfaction_rate, 0) / enrichedResults.length) * 100) / 100
+          : 0;
+
+        res.json({
+          month,
+          department_id: parseInt(id),
+          average_satisfaction_rate: avgRate,
+          need_attention_count: needAttentionCount,
+          nurses: enrichedResults
+        });
+      }
+    );
   }).catch(err => res.status(500).json({ error: err.message }));
 });
 

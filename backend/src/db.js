@@ -510,6 +510,39 @@ db.serialize(() => {
   )`);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_schedule_versions_dept_month ON schedule_versions(department_id, month);`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS schedule_preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nurse_id INTEGER NOT NULL,
+    department_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    rest_dates TEXT DEFAULT '[]',
+    work_dates TEXT DEFAULT '[]',
+    preferred_shifts TEXT DEFAULT '[]',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(nurse_id, month)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS preference_satisfaction_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nurse_id INTEGER NOT NULL,
+    department_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    total_preferences INTEGER NOT NULL DEFAULT 0,
+    satisfied_preferences INTEGER NOT NULL DEFAULT 0,
+    satisfaction_rate REAL NOT NULL DEFAULT 0,
+    satisfied_details TEXT DEFAULT '[]',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(nurse_id, month)
+  )`);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_schedule_preferences_dept_month ON schedule_preferences(department_id, month);`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_preference_satisfaction_dept_month ON preference_satisfaction_records(department_id, month);`);
 });
 
 module.exports = db;

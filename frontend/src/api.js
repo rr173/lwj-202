@@ -329,4 +329,16 @@ export const compareScheduleVersions = (deptId, versionAId, versionBId) =>
 export const rollbackScheduleVersion = (deptId, versionId, force) =>
   api.post(`/departments/${deptId}/schedule-versions/${versionId}/rollback`, { force });
 
+export const getNursePreferences = (nurseId, month) =>
+  api.get(`/nurses/${nurseId}/preferences`, { params: { month } });
+
+export const updateNursePreferences = (nurseId, data) =>
+  api.put(`/nurses/${nurseId}/preferences`, data);
+
+export const getPreferencesSummary = (deptId, month) =>
+  api.get(`/departments/${deptId}/preferences-summary`, { params: { month } });
+
+export const getPreferenceSatisfaction = (deptId, month) =>
+  api.get(`/departments/${deptId}/preference-satisfaction`, { params: { month } });
+
 export default api;

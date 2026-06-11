@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { 
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
   message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert, Checkbox, Progress, InputNumber,
-  Drawer, Timeline, Empty, Divider, Descriptions, Steps
+  Drawer, Timeline, Empty, Divider, Descriptions, Steps,
+  Row, Col, Card, Statistic
 } from 'antd';
 const { RangePicker } = DatePicker;
 import dayjs from 'dayjs';
@@ -22,7 +23,9 @@ import {
   getNurseLeaveBalance, getLeaveQuotaOverview, getLeaveQuotaConfig, updateLeaveQuotaConfig,
   getSecondmentRequests, createSecondmentRequest, approveSecondmentRequest, rejectSecondmentRequest,
   cancelSecondmentRequest, getSecondmentNurses, getLentOutNurses,
-  getScheduleVersions, compareScheduleVersions, rollbackScheduleVersion
+  getScheduleVersions, compareScheduleVersions, rollbackScheduleVersion,
+  getNursePreferences, updateNursePreferences,
+  getPreferencesSummary, getPreferenceSatisfaction
 } from './api';
 
 const { Option } = Select;
@@ -201,6 +204,18 @@ function SchedulePage() {
   const [rollbackConflicts, setRollbackConflicts] = useState(null);
   const [rollbackLoading, setRollbackLoading] = useState(false);
 
+  const [preferenceModalVisible, setPreferenceModalVisible] = useState(false);
+  const [preferenceEditingNurse, setPreferenceEditingNurse] = useState(null);
+  const [prefRestDates, setPrefRestDates] = useState([]);
+  const [prefWorkDates, setPrefWorkDates] = useState([]);
+  const [prefShifts, setPrefShifts] = useState([]);
+  const [preferencesSummary, setPreferencesSummary] = useState(null);
+  const [preferenceSatisfaction, setPreferenceSatisfaction] = useState(null);
+  const [prefHeatmapDrawerVisible, setPrefHeatmapDrawerVisible] = useState(false);
+  const [prefSatisfactionDrawerVisible, setPrefSatisfactionDrawerVisible] = useState(false);
+  const [prefDetailModalVisible, setPrefDetailModalVisible] = useState(false);
+  const [prefDetailNurse, setPrefDetailNurse] = useState(null);
+
   const fatigueMap = {};
   (fatigueData || []).forEach(f => {
     fatigueMap[f.nurse_id] = f;
@@ -228,6 +243,8 @@ function SchedulePage() {
       loadSecondmentRequests();
       loadSecondmentNurses();
       loadLentOutNurses();
+      loadPreferencesSummary();
+      loadPreferenceSatisfaction();
     }
   }, [selectedDept, month]);
 
@@ -426,6 +443,122 @@ function SchedulePage() {
     } catch (err) {
       setLentOutNurses([]);
     }
+  };
+
+  const loadPreferencesSummary = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getPreferencesSummary(selectedDept.id, month.format('YYYY-MM'));
+      setPreferencesSummary(res.data);
+    } catch (err) {
+      setPreferencesSummary(null);
+    }
+  };
+
+  const loadPreferenceSatisfaction = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getPreferenceSatisfaction(selectedDept.id, month.format('YYYY-MM'));
+      setPreferenceSatisfaction(res.data);
+    } catch (err) {
+      setPreferenceSatisfaction(null);
+    }
+  };
+
+  const handleOpenPreferenceModal = async (nurse) => {
+    setPreferenceEditingNurse(nurse);
+    setPrefRestDates([]);
+    setPrefWorkDates([]);
+    setPrefShifts([]);
+    try {
+      const res = await getNursePreferences(nurse.id, month.format('YYYY-MM'));
+      setPrefRestDates(res.data.rest_dates || []);
+      setPrefWorkDates(res.data.work_dates || []);
+      setPrefShifts(res.data.preferred_shifts || []);
+    } catch (err) {}
+    setPreferenceModalVisible(true);
+  };
+
+  const handleSavePreferences = async () => {
+    if (!preferenceEditingNurse) return;
+    try {
+      await updateNursePreferences(preferenceEditingNurse.id, {
+        month: month.format('YYYY-MM'),
+        rest_dates: prefRestDates,
+        work_dates: prefWorkDates,
+        preferred_shifts: prefShifts
+      });
+      message.success('偏好保存成功');
+      setPreferenceModalVisible(false);
+      loadPreferencesSummary();
+    } catch (err) {
+      message.error(`保存失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const togglePrefDate = (dateStr, type) => {
+    const setFn = type === 'rest' ? setPrefRestDates : setPrefWorkDates;
+    const current = type === 'rest' ? prefRestDates : prefWorkDates;
+    const maxCount = type === 'rest' ? 5 : 3;
+    const opposite = type === 'rest' ? prefWorkDates : prefRestDates;
+
+    if (opposite.includes(dateStr)) {
+      message.warning('同一天不能同时标记为"希望休息"和"希望上班"');
+      return;
+    }
+
+    if (current.includes(dateStr)) {
+      setFn(current.filter(d => d !== dateStr));
+    } else {
+      if (current.length >= maxCount) {
+        message.warning(`最多只能标记${maxCount}天`);
+        return;
+      }
+      setFn([...current, dateStr]);
+    }
+  };
+
+  const togglePrefShift = (shift) => {
+    if (prefShifts.includes(shift)) {
+      setPrefShifts(prefShifts.filter(s => s !== shift));
+    } else {
+      setPrefShifts([...prefShifts, shift]);
+    }
+  };
+
+  const handleGenerateSchedule = async () => {
+    if (!selectedDept) return;
+    setLoading(true);
+    try {
+      const res = await generateSchedule(selectedDept.id, month.format('YYYY-MM'));
+      message.success('排班生成成功');
+      if (res.data.preference_satisfaction) {
+        const ps = res.data.preference_satisfaction;
+        message.info(`偏好平均满足率: ${ps.average_rate}% (${ps.nurses_count}名护士提交了偏好)`);
+      }
+      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
+        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
+        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
+      }
+      if (res.data.skill_warnings && res.data.skill_warnings.length > 0) {
+        const summary = {};
+        res.data.skill_warnings.forEach(w => {
+          const key = `${w.shift_name}-${w.skill_name}`;
+          if (!summary[key]) summary[key] = { ...w, count: 0 };
+          summary[key].count++;
+        });
+        const details = Object.values(summary).map(s => `${s.shift_name}缺"${s.skill_name}"(${s.count}天)`).join('、');
+        message.warning({ content: `技能覆盖不足：${details}，建议调整护士技能或班次要求`, duration: 10 });
+      }
+      loadSchedule();
+      loadMonthlyReport();
+      loadFatigueStatus();
+      loadSkillCoverageReport();
+      loadPreferenceSatisfaction();
+    } catch (err) {
+      message.error(`排班生成失败: ${err.response?.data?.error || err.message}`);
+    }
+    setLoading(false);
   };
 
   const loadScheduleVersions = async () => {
@@ -677,36 +810,6 @@ function SchedulePage() {
     } catch (err) {
       message.error(`更新失败: ${err.response?.data?.error || err.message}`);
     }
-  };
-
-  const handleGenerateSchedule = async () => {
-    if (!selectedDept) return;
-    setLoading(true);
-    try {
-      const res = await generateSchedule(selectedDept.id, month.format('YYYY-MM'));
-      message.success('排班生成成功');
-      if (res.data.fatigue_warnings && res.data.fatigue_warnings.length > 0) {
-        const names = res.data.fatigue_warnings.map(w => `${w.nurse_name}(${w.total_hours}h)`).join('、');
-        message.warning({ content: `疲劳预警：${names} 近7日累计工时已超过48小时`, duration: 6 });
-      }
-      if (res.data.skill_warnings && res.data.skill_warnings.length > 0) {
-        const summary = {};
-        res.data.skill_warnings.forEach(w => {
-          const key = `${w.shift_name}-${w.skill_name}`;
-          if (!summary[key]) summary[key] = { ...w, count: 0 };
-          summary[key].count++;
-        });
-        const details = Object.values(summary).map(s => `${s.shift_name}缺"${s.skill_name}"(${s.count}天)`).join('、');
-        message.warning({ content: `技能覆盖不足：${details}，建议调整护士技能或班次要求`, duration: 10 });
-      }
-      loadSchedule();
-      loadMonthlyReport();
-      loadFatigueStatus();
-      loadSkillCoverageReport();
-    } catch (err) {
-      message.error(`排班生成失败: ${err.response?.data?.error || err.message}`);
-    }
-    setLoading(false);
   };
 
   const handleCellClick = (nurse, date, shift, scheduleId) => {
@@ -1703,6 +1806,15 @@ function SchedulePage() {
             <Button onClick={openVersionDrawer}>
               版本历史
             </Button>
+            <Button onClick={() => setPrefHeatmapDrawerVisible(true)}>
+              {preferencesSummary?.need_attention_count > 0 && (
+                <Badge count={preferencesSummary.need_attention_count} style={{ marginRight: 4 }} />
+              )}
+              偏好热力图
+            </Button>
+            <Button onClick={() => setPrefSatisfactionDrawerVisible(true)}>
+              满足率分析
+            </Button>
             <Button onClick={() => {
               leaveForm.resetFields();
               setLeaveModalVisible(true);
@@ -1798,14 +1910,20 @@ function SchedulePage() {
                       const nurseSecondment = scheduleSecondments.find(s => s.nurse_id === nurse.id);
                       const isLentOut = !!nurseSecondment;
                       const isBorrowed = nurse.is_secondment;
+                      const needAttention = preferenceSatisfaction?.nurses?.find(n => n.nurse_id === nurse.id)?.need_attention;
+                      const satInfo = preferenceSatisfaction?.nurses?.find(n => n.nurse_id === nurse.id);
+                      const myPref = preferencesSummary?.preferences?.find(p => p.nurse_id === nurse.id);
                       return (
                         <tr key={nurse.id}>
-                          <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left', background: isFatigue ? '#fff7e6' : (isLentOut || isBorrowed ? '#f9f0ff' : 'transparent') }}>
-                            <Tooltip title={isFatigue ? `近7日累计${fatigueHours}小时` : (isLentOut ? `借调至${nurseSecondment.to_department_name || '其他科室'}` : (isBorrowed ? `借入自${nurse.secondment_info?.from_department_name || '其他科室'}` : ''))}>
-                              <span style={{ color: isFatigue ? '#fa8c16' : (isLentOut || isBorrowed ? '#722ed1' : 'inherit'), fontWeight: isFatigue || isLentOut || isBorrowed ? '600' : 'normal' }}>
+                          <td style={{ border: '1px solid #e8e8e8', padding: '8px', textAlign: 'left', background: isFatigue ? '#fff7e6' : (needAttention ? '#fff1f0' : (isLentOut || isBorrowed ? '#f9f0ff' : 'transparent')) }}>
+                            <Tooltip title={isFatigue ? `近7日累计${fatigueHours}小时` : (needAttention ? satInfo?.attention_reason : (isLentOut ? `借调至${nurseSecondment.to_department_name || '其他科室'}` : (isBorrowed ? `借入自${nurse.secondment_info?.from_department_name || '其他科室'}` : '')))}>
+                              <span style={{ color: isFatigue ? '#fa8c16' : (needAttention ? '#ff4d4f' : (isLentOut || isBorrowed ? '#722ed1' : 'inherit')), fontWeight: isFatigue || isLentOut || isBorrowed || needAttention ? '600' : 'normal' }}>
                                 {nurse.name}
                               </span>
                             </Tooltip>
+                            {needAttention && (
+                              <Tag color="red" style={{ fontSize: '10px', padding: '0 4px', lineHeight: '16px', marginTop: '2px', marginLeft: '2px', display: 'inline-block' }}>需关注</Tag>
+                            )}
                             {isBorrowed && (
                               <Tag color="orange" style={{ fontSize: '10px', padding: '0 4px', lineHeight: '16px', marginTop: '2px', display: 'inline-block' }}>借入</Tag>
                             )}
@@ -1814,6 +1932,11 @@ function SchedulePage() {
                             )}
                             <div style={{ fontSize: '12px', color: nurse.level === 'senior' ? '#fa8c16' : '#999' }}>
                               {nurse.level === 'senior' ? '资深' : '普通'}
+                              {satInfo && (
+                                <span style={{ marginLeft: '6px', color: satInfo.satisfaction_rate < 50 ? '#ff4d4f' : (satInfo.satisfaction_rate < 80 ? '#fa8c16' : '#52c41a') }}>
+                                  满足率: {satInfo.satisfaction_rate}%
+                                </span>
+                              )}
                             </div>
                             {nurse.skills && nurse.skills.length > 0 && (
                               <div style={{ marginTop: '4px', display: 'flex', flexWrap: 'wrap', gap: '2px' }}>
@@ -1825,9 +1948,27 @@ function SchedulePage() {
                             {isFatigue && (
                               <div style={{ fontSize: '11px', color: '#fa8c16', marginTop: '2px' }}>⚠ 疲劳预警</div>
                             )}
-                            <Button size="small" type="link" style={{ fontSize: '11px', padding: 0, height: 'auto' }} onClick={() => handleOpenNurseSkillModal(nurse)}>
-                              编辑技能
-                            </Button>
+                            {needAttention && (
+                              <div style={{ fontSize: '11px', color: '#ff4d4f', marginTop: '2px' }}>⚠ 连续两月满足率低于50%</div>
+                            )}
+                            {myPref && (
+                              <div style={{ fontSize: '11px', color: '#1890ff', marginTop: '2px' }}>
+                                ✔ 已提交偏好(休{myPref.rest_dates?.length || 0}/上{myPref.work_dates?.length || 0})
+                              </div>
+                            )}
+                            <div style={{ marginTop: '4px', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                              <Button size="small" type="link" style={{ fontSize: '11px', padding: 0, height: 'auto' }} onClick={() => handleOpenNurseSkillModal(nurse)}>
+                                编辑技能
+                              </Button>
+                              <Button size="small" type="link" style={{ fontSize: '11px', padding: 0, height: 'auto' }} onClick={() => handleOpenPreferenceModal(nurse)}>
+                                设置偏好
+                              </Button>
+                              {satInfo && (
+                                <Button size="small" type="link" style={{ fontSize: '11px', padding: 0, height: 'auto' }} onClick={() => { setPrefDetailNurse(satInfo); setPrefDetailModalVisible(true); }}>
+                                  满足详情
+                                </Button>
+                              )}
+                            </div>
                           </td>
                           {days.map(day => {
                             const dateStr = day.format('YYYY-MM-DD');
@@ -3071,6 +3212,490 @@ function SchedulePage() {
           </div>
         )}
       </Modal>
+
+      <Modal
+        title={preferenceEditingNurse ? `${preferenceEditingNurse.name} - 排班偏好设置 (${month.format('YYYY年MM月')})` : '排班偏好设置'}
+        open={preferenceModalVisible}
+        onCancel={() => setPreferenceModalVisible(false)}
+        width={820}
+        footer={[
+          <Button key="cancel" onClick={() => setPreferenceModalVisible(false)}>取消</Button>,
+          <Button key="save" type="primary" onClick={handleSavePreferences}>保存偏好</Button>
+        ]}
+      >
+        <div style={{ marginBottom: '16px' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="偏好说明"
+            description={
+              <div>
+                <div>• <strong>希望休息</strong>（最多5天）：尽量在这些天安排休息</div>
+                <div>• <strong>希望上班</strong>（最多3天）：尽量在这些天安排上班</div>
+                <div>• <strong>偏好班次</strong>：优先分配所选班次类型</div>
+                <div style={{ color: '#999', marginTop: '4px' }}>
+                  注意：偏好为软约束，系统将在满足硬约束的前提下尽量满足，不保证100%实现
+                </div>
+              </div>
+            }
+            style={{ marginBottom: '16px' }}
+          />
+
+          <div style={{ marginBottom: '12px', display: 'flex', gap: '16px', alignItems: 'center' }}>
+            <span style={{ fontWeight: '500' }}>偏好班次：</span>
+            <Checkbox.Group
+              value={prefShifts}
+              onChange={setPrefShifts}
+            >
+              <Checkbox value="morning" style={{ color: SHIFT_COLORS.morning }}>早班</Checkbox>
+              <Checkbox value="afternoon" style={{ color: SHIFT_COLORS.afternoon }}>中班</Checkbox>
+              <Checkbox value="night" style={{ color: SHIFT_COLORS.night }}>夜班</Checkbox>
+            </Checkbox.Group>
+          </div>
+
+          <div style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+            <span style={{ marginRight: '24px' }}>
+              📅 希望休息：<strong style={{ color: '#ff4d4f' }}>{prefRestDates.length}</strong>/5 天
+            </span>
+            <span style={{ marginRight: '24px' }}>
+              📅 希望上班：<strong style={{ color: '#52c41a' }}>{prefWorkDates.length}</strong>/3 天
+            </span>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '6px' }}>
+          {(() => {
+            const year = month.year();
+            const monthNum = month.month();
+            const firstDay = dayjs(`${year}-${String(monthNum + 1).padStart(2, '0')}-01`);
+            const startWeekday = firstDay.day();
+            const daysInMonth = firstDay.daysInMonth();
+            const cells = [];
+            const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
+            weekdays.forEach(w => cells.push(
+              <div key={`head-${w}`} style={{ textAlign: 'center', fontWeight: '500', color: '#666', fontSize: '13px', padding: '6px 0', background: '#fafafa', borderRadius: '4px' }}>
+                {w}
+              </div>
+            ));
+            for (let i = 0; i < startWeekday; i++) {
+              cells.push(<div key={`empty-${i}`}></div>);
+            }
+            for (let d = 1; d <= daysInMonth; d++) {
+              const dateStr = `${year}-${String(monthNum + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+              const isRest = prefRestDates.includes(dateStr);
+              const isWork = prefWorkDates.includes(dateStr);
+              let bgColor = '#fff';
+              let borderColor = '#e8e8e8';
+              let textColor = '#333';
+              let label = '';
+              if (isRest) {
+                bgColor = '#fff1f0';
+                borderColor = '#ff4d4f';
+                textColor = '#ff4d4f';
+                label = '休';
+              } else if (isWork) {
+                bgColor = '#f6ffed';
+                borderColor = '#52c41a';
+                textColor = '#52c41a';
+                label = '班';
+              }
+              cells.push(
+                <div
+                  key={dateStr}
+                  onClick={() => togglePrefDate(dateStr, 'rest')}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    togglePrefDate(dateStr, 'work');
+                  }}
+                  title="左键点击=希望休息 / 右键点击=希望上班"
+                  style={{
+                    textAlign: 'center',
+                    padding: '14px 4px',
+                    border: `2px solid ${borderColor}`,
+                    borderRadius: '6px',
+                    background: bgColor,
+                    color: textColor,
+                    cursor: 'pointer',
+                    userSelect: 'none',
+                    fontSize: '13px',
+                    position: 'relative',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  <div style={{ fontWeight: '500' }}>{d}</div>
+                  {label && <div style={{ fontSize: '10px', fontWeight: '600', marginTop: '2px' }}>{label}</div>}
+                </div>
+              );
+            }
+            return cells;
+          })()}
+        </div>
+
+        <div style={{ marginTop: '12px', fontSize: '12px', color: '#999' }}>
+          💡 操作提示：左键单击标记/取消"希望休息"，右键单击标记/取消"希望上班"
+        </div>
+      </Modal>
+
+      <Drawer
+        title={`偏好热力图与汇总 (${month.format('YYYY年MM月')})`}
+        open={prefHeatmapDrawerVisible}
+        onClose={() => setPrefHeatmapDrawerVisible(false)}
+        width={900}
+      >
+        {preferencesSummary && (() => {
+          const submitSummary = preferencesSummary.submit_summary;
+          const restHeatmap = preferencesSummary.rest_heatmap || {};
+          const workHeatmap = preferencesSummary.work_heatmap || {};
+          const preferences = preferencesSummary.preferences || [];
+          const maxRest = Math.max(1, ...Object.values(restHeatmap).map(h => h.count));
+
+          const year = month.year();
+          const monthNum = month.month();
+          const firstDay = dayjs(`${year}-${String(monthNum + 1).padStart(2, '0')}-01`);
+          const startWeekday = firstDay.day();
+          const daysInMonth = firstDay.daysInMonth();
+          const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
+
+          const getHeatColor = (count, maxVal) => {
+            if (count === 0) return '#fff';
+            const intensity = Math.min(count / maxVal, 1);
+            if (intensity < 0.25) return '#ffe0e0';
+            if (intensity < 0.5) return '#ffbdbd';
+            if (intensity < 0.75) return '#ff9b9b';
+            return '#ff4d4f';
+          };
+
+          const getTextColor = (count, maxVal) => {
+            if (count === 0) return '#333';
+            const intensity = Math.min(count / maxVal, 1);
+            return intensity > 0.5 ? '#fff' : '#333';
+          };
+
+          return (
+            <>
+              <Descriptions
+                bordered
+                size="small"
+                column={3}
+                style={{ marginBottom: '16px' }}
+              >
+                <Descriptions.Item label="总护士数">{submitSummary.total_nurses}</Descriptions.Item>
+                <Descriptions.Item label="已提交偏好">{submitSummary.submitted_count}</Descriptions.Item>
+                <Descriptions.Item label="提交率">
+                  <Progress percent={submitSummary.submission_rate} size="small" />
+                </Descriptions.Item>
+              </Descriptions>
+
+              <div style={{ marginBottom: '16px' }}>
+                <Divider orientation="left" style={{ margin: '12px 0', fontWeight: '500' }}>🔥 "希望休息"冲突热力图（颜色越深冲突越大）</Divider>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '6px' }}>
+                  {weekdays.map(w => (
+                    <div key={`rhead-${w}`} style={{ textAlign: 'center', fontWeight: '500', color: '#666', fontSize: '13px', padding: '6px 0', background: '#fafafa', borderRadius: '4px' }}>
+                      {w}
+                    </div>
+                  ))}
+                  {Array.from({ length: startWeekday }).map((_, i) => (
+                    <div key={`rempty-${i}`}></div>
+                  ))}
+                  {Array.from({ length: daysInMonth }).map((_, idx) => {
+                    const d = idx + 1;
+                    const dateStr = `${year}-${String(monthNum + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                    const data = restHeatmap[dateStr] || { count: 0, nurses: [] };
+                    const count = data.count;
+                    const bg = getHeatColor(count, maxRest);
+                    const tc = getTextColor(count, maxRest);
+                    return (
+                      <Tooltip
+                        key={`r-${dateStr}`}
+                        title={
+                          data.nurses.length > 0
+                            ? `${dateStr} 共${count}人希望休息：${data.nurses.map(n => n.nurse_name).join('、')}`
+                            : `${dateStr} 暂无休息偏好`
+                        }
+                      >
+                        <div
+                          style={{
+                            textAlign: 'center',
+                            padding: '10px 4px',
+                            border: '1px solid #e8e8e8',
+                            borderRadius: '4px',
+                            background: bg,
+                            color: tc,
+                            cursor: data.nurses.length > 0 ? 'pointer' : 'default',
+                            fontSize: '12px',
+                            minHeight: '52px'
+                          }}
+                        >
+                          <div style={{ fontWeight: '500' }}>{d}</div>
+                          {count > 0 && <div style={{ fontSize: '18px', fontWeight: '600' }}>{count}人</div>}
+                        </div>
+                      </Tooltip>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div style={{ marginTop: '8px', display: 'flex', gap: '16px', fontSize: '12px', color: '#666', alignItems: 'center' }}>
+                <span>图例：</span>
+                {[0, 1, 2, 3, 5].map(n => {
+                  const bg = getHeatColor(n, maxRest);
+                  const tc = getTextColor(n, maxRest);
+                  return (
+                    <span key={n} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <div style={{ width: '20px', height: '20px', background: bg, border: '1px solid #e8e8e8', borderRadius: '3px', color: tc, textAlign: 'center', fontSize: '10px', lineHeight: '18px' }}>
+                        {n > 0 ? n : ''}
+                      </div>
+                    </span>
+                  );
+                })}
+              </div>
+
+              <Divider orientation="left" style={{ margin: '20px 0', fontWeight: '500' }}>📋 护士偏好列表</Divider>
+
+              {preferences.length === 0 ? (
+                <Empty description="暂无护士提交偏好" />
+              ) : (
+                <Table
+                  size="small"
+                  pagination={false}
+                  dataSource={preferences}
+                  rowKey="nurse_id"
+                  columns={[
+                    { title: '护士', dataIndex: 'nurse_name', key: 'nurse_name', width: 80 },
+                    { title: '级别', dataIndex: 'nurse_level', key: 'nurse_level', width: 60, align: 'center',
+                      render: v => v === 'senior' ? '资深' : '普通'
+                    },
+                    {
+                      title: '希望休息', key: 'rest',
+                      render: (_, r) => (r.rest_dates?.length || 0) > 0 ? (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px' }}>
+                          {r.rest_dates.map(d => (
+                            <Tag key={d} color="red" style={{ margin: 0 }}>
+                              {d.substring(5)}
+                            </Tag>
+                          ))}
+                        </div>
+                      ) : <span style={{ color: '#999' }}>-</span>
+                    },
+                    {
+                      title: '希望上班', key: 'work',
+                      render: (_, r) => (r.work_dates?.length || 0) > 0 ? (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px' }}>
+                          {r.work_dates.map(d => (
+                            <Tag key={d} color="green" style={{ margin: 0 }}>
+                              {d.substring(5)}
+                            </Tag>
+                          ))}
+                        </div>
+                      ) : <span style={{ color: '#999' }}>-</span>
+                    },
+                    {
+                      title: '偏好班次', key: 'shifts',
+                      render: (_, r) => (r.preferred_shifts?.length || 0) > 0 ? (
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          {r.preferred_shifts.map(s => (
+                            <Tag key={s} color={SHIFT_COLORS[s]} style={{ margin: 0 }}>
+                              {SHIFT_NAMES[s]}
+                            </Tag>
+                          ))}
+                        </div>
+                      ) : <span style={{ color: '#999' }}>无</span>
+                    }
+                  ]}
+                />
+              )}
+            </>
+          );
+        })()}
+      </Drawer>
+
+      <Drawer
+        title={`偏好满足率分析 (${month.format('YYYY年MM月')})`}
+        open={prefSatisfactionDrawerVisible}
+        onClose={() => setPrefSatisfactionDrawerVisible(false)}
+        width={900}
+      >
+        {preferenceSatisfaction && (() => {
+          const nurses = preferenceSatisfaction.nurses || [];
+          const avgRate = preferenceSatisfaction.average_satisfaction_rate;
+          const rateColor = avgRate < 50 ? '#ff4d4f' : avgRate < 80 ? '#fa8c16' : '#52c41a';
+          return (
+            <>
+              <Row gutter={16} style={{ marginBottom: '16px' }}>
+                <Col span={8}>
+                  <Card size="small">
+                    <Statistic
+                      title="平均满足率"
+                      value={avgRate}
+                      suffix="%"
+                      precision={2}
+                      valueStyle={{ color: rateColor }}
+                    />
+                  </Card>
+                </Col>
+                <Col span={8}>
+                  <Card size="small">
+                    <Statistic title="提交偏好护士数" value={nurses.length} />
+                  </Card>
+                </Col>
+                <Col span={8}>
+                  <Card size="small">
+                    <Statistic
+                      title="需关注人数"
+                      value={preferenceSatisfaction.need_attention_count}
+                      valueStyle={{ color: '#ff4d4f' }}
+                    />
+                  </Card>
+                </Col>
+              </Row>
+
+              {nurses.length === 0 ? (
+                <Empty description="暂无数据，请先生成排班后查看满足率" />
+              ) : (
+                <Table
+                  size="small"
+                  dataSource={nurses.sort((a, b) => a.satisfaction_rate - b.satisfaction_rate)}
+                  rowKey="nurse_id"
+                  pagination={{ pageSize: 20 }}
+                  columns={[
+                    {
+                      title: '护士', dataIndex: 'nurse_name', key: 'nurse_name', width: 90,
+                      render: (text, r) => (
+                        <span>
+                          {text}
+                          {r.need_attention && (
+                            <Tag color="red" style={{ marginLeft: 4, fontSize: '10px' }}>需关注</Tag>
+                          )}
+                        </span>
+                      )
+                    },
+                    {
+                      title: '满足率',
+                      key: 'rate',
+                      width: 180,
+                      render: (_, r) => {
+                        const color = r.satisfaction_rate < 50 ? '#ff4d4f' : r.satisfaction_rate < 80 ? '#fa8c16' : '#52c41a';
+                        return (
+                          <Progress
+                            percent={r.satisfaction_rate}
+                            size="small"
+                            strokeColor={color}
+                          />
+                        );
+                      }
+                    },
+                    { title: '总偏好数', dataIndex: 'total_preferences', key: 'total', width: 80, align: 'center' },
+                    { title: '已满足', dataIndex: 'satisfied_preferences', key: 'satisfied', width: 80, align: 'center',
+                      render: (v, r) => `${v}/${r.total_preferences}`
+                    },
+                    {
+                      title: '上月满足率', key: 'prev', width: 90, align: 'center',
+                      render: (_, r) => r.previous_month_rate !== undefined
+                        ? <span style={{
+                          color: r.previous_month_rate < 50 ? '#ff4d4f' : '#666'
+                        }}>{r.previous_month_rate}%</span>
+                        : <span style={{ color: '#999' }}>-</span>
+                    },
+                    {
+                      title: '操作', key: 'action', width: 80, align: 'center',
+                      render: (_, r) => (
+                        <Button
+                          type="link"
+                          size="small"
+                          onClick={() => { setPrefDetailNurse(r); setPrefDetailModalVisible(true); }}
+                        >
+                          详情
+                        </Button>
+                      )
+                    }
+                  ]}
+                />
+              )}
+            </>
+          );
+        })()}
+      </Drawer>
+
+      <Modal
+        title={`${prefDetailNurse?.nurse_name || ''} - 偏好满足详情`}
+        open={prefDetailModalVisible}
+        onCancel={() => setPrefDetailModalVisible(false)}
+        onOk={() => setPrefDetailModalVisible(false)}
+        width={700}
+        footer={[<Button key="ok" type="primary" onClick={() => setPrefDetailModalVisible(false)}>确定</Button>]}
+      >
+        {prefDetailNurse && (
+          <div>
+            {prefDetailNurse.need_attention && (
+              <Alert
+                type="warning"
+                showIcon
+                message="需关注"
+                description={prefDetailNurse.attention_reason}
+                style={{ marginBottom: '16px' }}
+              />
+            )}
+
+            <Descriptions bordered size="small" column={2} style={{ marginBottom: '16px' }}>
+              <Descriptions.Item label="满足率">
+                <strong style={{
+                  color: prefDetailNurse.satisfaction_rate < 50 ? '#ff4d4f' :
+                    prefDetailNurse.satisfaction_rate < 80 ? '#fa8c16' : '#52c41a'
+                }}>
+                  {prefDetailNurse.satisfaction_rate}%
+                </strong>
+              </Descriptions.Item>
+              <Descriptions.Item label="明细">
+                {prefDetailNurse.satisfied_preferences}/{prefDetailNurse.total_preferences}
+              </Descriptions.Item>
+              <Descriptions.Item label="希望休息天数">{prefDetailNurse.rest_count || 0}天</Descriptions.Item>
+              <Descriptions.Item label="希望上班天数">{prefDetailNurse.work_count || 0}天</Descriptions.Item>
+              <Descriptions.Item label="偏好班次类型" span={2}>
+                {prefDetailNurse.preferred_shift_count > 0
+                  ? `${prefDetailNurse.preferred_shift_count}种`
+                  : <span style={{ color: '#999' }}>无</span>
+                }
+              </Descriptions.Item>
+            </Descriptions>
+
+            <Divider orientation="left">满足情况明细</Divider>
+
+            <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+              <Table
+                size="small"
+                pagination={false}
+                dataSource={prefDetailNurse.satisfied_details || []}
+                rowKey={(r, i) => `${r.type}-${r.date}-${i}`}
+                columns={[
+                  {
+                    title: '类型', key: 'type', width: 100,
+                    render: (_, r) => {
+                      const typeMap = {
+                        rest: { text: '希望休息', color: '#ff4d4f' },
+                        work: { text: '希望上班', color: '#52c41a' },
+                        shift: { text: '偏好班次', color: '#1890ff' }
+                      };
+                      const t = typeMap[r.type] || { text: r.type, color: '#666' };
+                      return <Tag color={t.color}>{t.text}</Tag>;
+                    }
+                  },
+                  { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
+                  {
+                    title: '实际安排', dataIndex: 'actual', key: 'actual'
+                  },
+                  {
+                    title: '状态', key: 'status', width: 80,
+                    render: (_, r) => r.satisfied
+                      ? <Tag color="green">✓ 满足</Tag>
+                      : <Tag color="red">✗ 未满足</Tag>
+                  }
+                ]}
+              />
+            </div>
+          </div>
+        )}
+      </Modal>
+
     </Layout>
   );
 }
