@@ -12,6 +12,11 @@ const suppliesRouter = require('./supplies');
 const carePathRouter = require('./carePath');
 
 const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
+const SHIFT_NAMES = {
+  morning: '早班',
+  afternoon: '中班',
+  night: '夜班'
+};
 const FATIGUE_THRESHOLD = 48;
 
 const LEAVE_TYPE_NAMES_CN = { personal: '事假', sick: '病假', annual: '年假' };
@@ -236,6 +241,188 @@ function compute7DayHoursForNurses(db, nurseIds, departmentId, referenceDate) {
                 );
               }
             );
+          }
+        );
+      }
+    );
+  });
+}
+
+const OPERATION_TYPE_NAMES_CN = {
+  auto_generate: '自动生成',
+  manual_adjust: '手动调整',
+  swap_effective: '换班生效',
+  substitute_effective: '补班生效',
+  version_rollback: '版本回溯'
+};
+
+function getNextVersionNumber(db, departmentId, month) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      'SELECT COALESCE(MAX(version_number), 0) as max_version FROM schedule_versions WHERE department_id = ? AND month = ?',
+      [departmentId, month],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve((row?.max_version || 0) + 1);
+      }
+    );
+  });
+}
+
+function createScheduleVersion(db, departmentId, month, operationType, operatorId, operatorName, remark) {
+  return new Promise((resolve, reject) => {
+    db.all(
+      'SELECT id, department_id, nurse_id, date, shift, month FROM schedules WHERE department_id = ? AND month = ? ORDER BY date, nurse_id',
+      [departmentId, month],
+      (err, schedules) => {
+        if (err) return reject(err);
+        const snapshot = JSON.stringify(schedules);
+        getNextVersionNumber(db, departmentId, month).then(versionNumber => {
+          db.run(
+            `INSERT INTO schedule_versions (department_id, month, version_number, operation_type, operator_id, operator_name, remark, snapshot)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [departmentId, month, versionNumber, operationType, operatorId || null, operatorName || null, remark || null, snapshot],
+            function(err) {
+              if (err) return reject(err);
+              resolve({ id: this.lastID, version_number: versionNumber });
+            }
+          );
+        }).catch(reject);
+      }
+    );
+  });
+}
+
+function getScheduleVersionsList(db, departmentId, month) {
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT id, department_id, month, version_number, operation_type, operator_id, operator_name, remark, created_at
+       FROM schedule_versions
+       WHERE department_id = ? AND month = ?
+       ORDER BY version_number DESC`,
+      [departmentId, month],
+      (err, rows) => {
+        if (err) return reject(err);
+        resolve(rows.map(r => ({
+          ...r,
+          operation_type_name: OPERATION_TYPE_NAMES_CN[r.operation_type] || r.operation_type
+        })));
+      }
+    );
+  });
+}
+
+function getScheduleVersionById(db, versionId) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      'SELECT * FROM schedule_versions WHERE id = ?',
+      [versionId],
+      (err, row) => {
+        if (err) return reject(err);
+        if (!row) return resolve(null);
+        resolve({
+          ...row,
+          snapshot_data: JSON.parse(row.snapshot || '[]')
+        });
+      }
+    );
+  });
+}
+
+function compareScheduleVersions(versionA, versionB, nurses) {
+  const nurseMap = {};
+  (nurses || []).forEach(n => { nurseMap[n.id] = n.name; });
+
+  const mapA = {};
+  versionA.forEach(s => { mapA[`${s.nurse_id}_${s.date}`] = s; });
+
+  const mapB = {};
+  versionB.forEach(s => { mapB[`${s.nurse_id}_${s.date}`] = s; });
+
+  const allKeys = new Set([...Object.keys(mapA), ...Object.keys(mapB)]);
+  const differences = [];
+
+  allKeys.forEach(key => {
+    const a = mapA[key];
+    const b = mapB[key];
+    if (!a && b) {
+      differences.push({
+        nurse_id: b.nurse_id,
+        nurse_name: nurseMap[b.nurse_id] || `护士${b.nurse_id}`,
+        date: b.date,
+        from_shift: null,
+        from_shift_name: null,
+        to_shift: b.shift,
+        to_shift_name: SHIFT_NAMES[b.shift] || b.shift,
+        change_type: 'added'
+      });
+    } else if (a && !b) {
+      differences.push({
+        nurse_id: a.nurse_id,
+        nurse_name: nurseMap[a.nurse_id] || `护士${a.nurse_id}`,
+        date: a.date,
+        from_shift: a.shift,
+        from_shift_name: SHIFT_NAMES[a.shift] || a.shift,
+        to_shift: null,
+        to_shift_name: null,
+        change_type: 'removed'
+      });
+    } else if (a && b && a.shift !== b.shift) {
+      differences.push({
+        nurse_id: a.nurse_id,
+        nurse_name: nurseMap[a.nurse_id] || `护士${a.nurse_id}`,
+        date: a.date,
+        from_shift: a.shift,
+        from_shift_name: SHIFT_NAMES[a.shift] || a.shift,
+        to_shift: b.shift,
+        to_shift_name: SHIFT_NAMES[b.shift] || b.shift,
+        change_type: 'changed'
+      });
+    }
+  });
+
+  differences.sort((a, b) => {
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    return a.nurse_id - b.nurse_id;
+  });
+
+  return differences;
+}
+
+function findConflictingSwapAndSubstitute(db, departmentId, month, targetVersionCreatedAt) {
+  return new Promise((resolve, reject) => {
+    const result = {
+      swap_conflicts: [],
+      substitute_conflicts: []
+    };
+
+    db.all(
+      `SELECT sr.*, 
+              r.name as requester_name, 
+              t.name as target_name
+       FROM swap_requests sr
+       JOIN nurses r ON sr.requester_id = r.id
+       JOIN nurses t ON sr.target_id = t.id
+       WHERE sr.department_id = ? AND sr.status = 'approved' AND sr.created_at > ?
+       ORDER BY sr.created_at DESC`,
+      [departmentId, targetVersionCreatedAt],
+      (err, swaps) => {
+        if (err) return reject(err);
+        result.swap_conflicts = swaps;
+
+        db.all(
+          `SELECT lr.*, n.name as nurse_name, sn.name as substitute_name
+           FROM leave_requests lr
+           JOIN nurses n ON lr.nurse_id = n.id
+           LEFT JOIN nurses sn ON lr.substitute_nurse_id = sn.id
+           WHERE lr.department_id = ? AND lr.status = 'approved' 
+           AND lr.substitute_status = 'confirmed' AND lr.created_at > ?
+           ORDER BY lr.created_at DESC`,
+          [departmentId, targetVersionCreatedAt],
+          (err, subs) => {
+            if (err) return reject(err);
+            result.substitute_conflicts = subs;
+            resolve(result);
           }
         );
       }
@@ -740,13 +927,17 @@ app.post('/api/departments/:id/generate-schedule', (req, res) => {
               if (err) {
                 return res.status(500).json({ error: err.message });
               }
-              const today = dayjs().format('YYYY-MM-DD');
-              compute7DayHours(db, id, today).then(fatigueData => {
-                const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
-                res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings, skill_warnings: result.skillWarnings || [] });
-              }).catch(() => {
-                res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings: [], skill_warnings: result.skillWarnings || [] });
-              });
+              createScheduleVersion(db, id, month, 'auto_generate', null, '系统', '自动生成排班')
+                .catch(err => console.error('保存版本快照失败:', err.message))
+                .finally(() => {
+                  const today = dayjs().format('YYYY-MM-DD');
+                  compute7DayHours(db, id, today).then(fatigueData => {
+                    const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                    res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings, skill_warnings: result.skillWarnings || [] });
+                  }).catch(() => {
+                    res.json({ success: true, schedule: result.schedule, shiftCounts: result.shiftCounts, fatigue_warnings: [], skill_warnings: result.skillWarnings || [] });
+                  });
+                });
             });
           });
         });
@@ -812,7 +1003,11 @@ app.put('/api/schedules/:id', (req, res) => {
               if (err) {
                 return res.status(500).json({ error: err.message });
               }
-              res.json({ success: true });
+              createScheduleVersion(db, schedule.department_id, schedule.month, 'manual_adjust', null, '管理员', '手动调整排班')
+                .catch(err => console.error('保存版本快照失败:', err.message))
+                .finally(() => {
+                  res.json({ success: true });
+                });
             });
           });
         });
@@ -994,13 +1189,17 @@ app.put('/api/swap-requests/:id/approve', (req, res) => {
                                     if (err) {
                                       return res.status(500).json({ error: err.message });
                                     }
-                                    const today = dayjs().format('YYYY-MM-DD');
-                                    compute7DayHoursForNurses(db, [requester_id, target_id], department_id, today).then(fatigueData => {
-                                      const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
-                                      res.json({ success: true, fatigue_warnings });
-                                    }).catch(() => {
-                                      res.json({ success: true, fatigue_warnings: [] });
-                                    });
+                                    createScheduleVersion(db, department_id, month, 'swap_effective', null, '管理员', `换班生效: ${request.requester_name || requester_id}与${request.target_name || target_id}`)
+                                      .catch(err => console.error('保存版本快照失败:', err.message))
+                                      .finally(() => {
+                                        const today = dayjs().format('YYYY-MM-DD');
+                                        compute7DayHoursForNurses(db, [requester_id, target_id], department_id, today).then(fatigueData => {
+                                          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+                                          res.json({ success: true, fatigue_warnings });
+                                        }).catch(() => {
+                                          res.json({ success: true, fatigue_warnings: [] });
+                                        });
+                                      });
                                   });
                                 });
                               }
@@ -1705,13 +1904,17 @@ app.put('/api/leave-requests/:id/confirm-substitute', (req, res) => {
         if (err) {
           return res.status(500).json({ error: err.message });
         }
-        const today = dayjs().format('YYYY-MM-DD');
-        compute7DayHoursForNurses(db, [finalSubId], request.department_id, today).then(fatigueData => {
-          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
-          res.json({ success: true, fatigue_warnings });
-        }).catch(() => {
-          res.json({ success: true, fatigue_warnings: [] });
-        });
+        createScheduleVersion(db, request.department_id, request.month, 'substitute_effective', null, '管理员', `补班生效: 护士${request.nurse_id}请假，${finalSubId}补班`)
+          .catch(err => console.error('保存版本快照失败:', err.message))
+          .finally(() => {
+            const today = dayjs().format('YYYY-MM-DD');
+            compute7DayHoursForNurses(db, [finalSubId], request.department_id, today).then(fatigueData => {
+              const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+              res.json({ success: true, fatigue_warnings });
+            }).catch(() => {
+              res.json({ success: true, fatigue_warnings: [] });
+            });
+          });
       });
   });
 });
@@ -1740,13 +1943,17 @@ app.put('/api/leave-requests/:id/manual-substitute', (req, res) => {
         if (err) {
           return res.status(500).json({ error: err.message });
         }
-        const today = dayjs().format('YYYY-MM-DD');
-        compute7DayHoursForNurses(db, [substitute_nurse_id], request.department_id, today).then(fatigueData => {
-          const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
-          res.json({ success: true, fatigue_warnings });
-        }).catch(() => {
-          res.json({ success: true, fatigue_warnings: [] });
-        });
+        createScheduleVersion(db, request.department_id, request.month, 'substitute_effective', null, '管理员', `手动补班生效: 护士${request.nurse_id}请假，${substitute_nurse_id}补班`)
+          .catch(err => console.error('保存版本快照失败:', err.message))
+          .finally(() => {
+            const today = dayjs().format('YYYY-MM-DD');
+            compute7DayHoursForNurses(db, [substitute_nurse_id], request.department_id, today).then(fatigueData => {
+              const fatigue_warnings = fatigueData.filter(f => f.is_fatigue_warning);
+              res.json({ success: true, fatigue_warnings });
+            }).catch(() => {
+              res.json({ success: true, fatigue_warnings: [] });
+            });
+          });
       });
   });
 });
@@ -1900,6 +2107,189 @@ app.get('/api/departments/:id/fatigue-status', (req, res) => {
   }).catch(err => {
     res.status(500).json({ error: err.message });
   });
+});
+
+app.get('/api/departments/:id/schedule-versions', (req, res) => {
+  const { id } = req.params;
+  const { month } = req.query;
+
+  if (!month) {
+    return res.status(400).json({ error: '请提供月份参数' });
+  }
+
+  getScheduleVersionsList(db, id, month)
+    .then(versions => res.json(versions))
+    .catch(err => res.status(500).json({ error: err.message }));
+});
+
+app.get('/api/schedule-versions/:id', (req, res) => {
+  const { id } = req.params;
+
+  getScheduleVersionById(db, id)
+    .then(version => {
+      if (!version) {
+        return res.status(404).json({ error: '版本不存在' });
+      }
+      delete version.snapshot;
+      version.operation_type_name = OPERATION_TYPE_NAMES_CN[version.operation_type] || version.operation_type;
+      res.json(version);
+    })
+    .catch(err => res.status(500).json({ error: err.message }));
+});
+
+app.get('/api/departments/:id/schedule-versions/compare', (req, res) => {
+  const { id } = req.params;
+  const { version_a_id, version_b_id } = req.query;
+  const { month } = req.query;
+
+  if (!version_a_id || !version_b_id) {
+    return res.status(400).json({ error: '请提供两个版本ID' });
+  }
+
+  Promise.all([
+    getScheduleVersionById(db, version_a_id),
+    getScheduleVersionById(db, version_b_id),
+    db.all ? new Promise((resolve, reject) => {
+      db.all('SELECT id, name FROM nurses WHERE department_id = ?', [id], (err, rows) => {
+        if (err) return reject(err);
+        resolve(rows);
+      });
+    }) : Promise.resolve([])
+  ]).then(([versionA, versionB, nurses]) => {
+    if (!versionA || !versionB) {
+      return res.status(404).json({ error: '版本不存在' });
+    }
+    if (versionA.department_id !== parseInt(id) || versionB.department_id !== parseInt(id)) {
+      return res.status(400).json({ error: '版本不属于该科室' });
+    }
+
+    const differences = compareScheduleVersions(versionA.snapshot_data, versionB.snapshot_data, nurses);
+    const summary = {
+      version_a: {
+        id: versionA.id,
+        version_number: versionA.version_number,
+        operation_type: versionA.operation_type,
+        operation_type_name: OPERATION_TYPE_NAMES_CN[versionA.operation_type],
+        operator_name: versionA.operator_name,
+        created_at: versionA.created_at
+      },
+      version_b: {
+        id: versionB.id,
+        version_number: versionB.version_number,
+        operation_type: versionB.operation_type,
+        operation_type_name: OPERATION_TYPE_NAMES_CN[versionB.operation_type],
+        operator_name: versionB.operator_name,
+        created_at: versionB.created_at
+      },
+      differences,
+      difference_count: differences.length,
+      added_count: differences.filter(d => d.change_type === 'added').length,
+      removed_count: differences.filter(d => d.change_type === 'removed').length,
+      changed_count: differences.filter(d => d.change_type === 'changed').length
+    };
+    res.json(summary);
+  }).catch(err => res.status(500).json({ error: err.message }));
+});
+
+app.post('/api/departments/:id/schedule-versions/:versionId/rollback', (req, res) => {
+  const { id, versionId } = req.params;
+  const { force } = req.body || {};
+
+  getScheduleVersionById(db, versionId).then(targetVersion => {
+    if (!targetVersion) {
+      return res.status(404).json({ error: '目标版本不存在' });
+    }
+    if (targetVersion.department_id !== parseInt(id)) {
+      return res.status(400).json({ error: '版本不属于该科室' });
+    }
+
+    findConflictingSwapAndSubstitute(db, id, targetVersion.month, targetVersion.created_at).then(conflicts => {
+      const hasConflicts = conflicts.swap_conflicts.length > 0 || conflicts.substitute_conflicts.length > 0;
+      if (hasConflicts && !force) {
+        return res.status(409).json({
+          error: '存在冲突的已审批记录，请先处理后再回溯',
+          conflicts: {
+            swap_count: conflicts.swap_conflicts.length,
+            substitute_count: conflicts.substitute_conflicts.length,
+            swap_conflicts: conflicts.swap_conflicts,
+            substitute_conflicts: conflicts.substitute_conflicts
+          }
+        });
+      }
+
+      const schedules = targetVersion.snapshot_data;
+      const month = targetVersion.month;
+
+      db.serialize(() => {
+        db.run('BEGIN TRANSACTION');
+        db.run('DELETE FROM schedules WHERE department_id = ? AND month = ?', [id, month], (err) => {
+          if (err) {
+            db.run('ROLLBACK');
+            return res.status(500).json({ error: err.message });
+          }
+
+          if (schedules.length === 0) {
+            db.run('COMMIT', (err) => {
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+              createScheduleVersion(db, id, month, 'version_rollback', null, '管理员', `回溯至V${targetVersion.version_number}版本`)
+                .then(versionInfo => {
+                  res.json({
+                    success: true,
+                    new_version: versionInfo,
+                    restored_count: 0,
+                    target_version: {
+                      id: targetVersion.id,
+                      version_number: targetVersion.version_number
+                    }
+                  });
+                })
+                .catch(err => res.status(500).json({ error: `回溯成功但保存新版本失败: ${err.message}` }));
+            });
+            return;
+          }
+
+          const stmt = db.prepare('INSERT INTO schedules (department_id, nurse_id, date, shift, month) VALUES (?, ?, ?, ?, ?)');
+          let completed = 0;
+          let insertError = null;
+
+          schedules.forEach(s => {
+            stmt.run(s.department_id, s.nurse_id, s.date, s.shift, s.month, (err) => {
+              if (err && !insertError) insertError = err;
+              completed++;
+              if (completed === schedules.length) {
+                stmt.finalize((finalizeErr) => {
+                  if (insertError || finalizeErr) {
+                    db.run('ROLLBACK');
+                    return res.status(500).json({ error: (insertError || finalizeErr).message });
+                  }
+                  db.run('COMMIT', (commitErr) => {
+                    if (commitErr) {
+                      return res.status(500).json({ error: commitErr.message });
+                    }
+                    createScheduleVersion(db, id, month, 'version_rollback', null, '管理员', `回溯至V${targetVersion.version_number}版本`)
+                      .then(versionInfo => {
+                        res.json({
+                          success: true,
+                          new_version: versionInfo,
+                          restored_count: schedules.length,
+                          target_version: {
+                            id: targetVersion.id,
+                            version_number: targetVersion.version_number
+                          }
+                        });
+                      })
+                      .catch(err => res.status(500).json({ error: `回溯成功但保存新版本失败: ${err.message}` }));
+                  });
+                });
+              }
+            });
+          });
+        });
+      });
+    }).catch(err => res.status(500).json({ error: err.message }));
+  }).catch(err => res.status(500).json({ error: err.message }));
 });
 
 app.listen(PORT, () => {

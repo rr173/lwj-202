@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { 
   Layout, Menu, Table, Button, DatePicker, Select, Modal, Form, 
-  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert, Checkbox, Progress, InputNumber
+  message, Tabs, Badge, Popconfirm, Space, Tag, Radio, TimePicker, Input, Tooltip, Alert, Checkbox, Progress, InputNumber,
+  Drawer, Timeline, Empty, Divider, Descriptions, Steps
 } from 'antd';
 const { RangePicker } = DatePicker;
 import dayjs from 'dayjs';
@@ -20,7 +21,8 @@ import {
   getSkillCoverageReport,
   getNurseLeaveBalance, getLeaveQuotaOverview, getLeaveQuotaConfig, updateLeaveQuotaConfig,
   getSecondmentRequests, createSecondmentRequest, approveSecondmentRequest, rejectSecondmentRequest,
-  cancelSecondmentRequest, getSecondmentNurses, getLentOutNurses
+  cancelSecondmentRequest, getSecondmentNurses, getLentOutNurses,
+  getScheduleVersions, compareScheduleVersions, rollbackScheduleVersion
 } from './api';
 
 const { Option } = Select;
@@ -188,6 +190,16 @@ function SchedulePage() {
   const [secondmentStatusFilter, setSecondmentStatusFilter] = useState(null);
   const [fromDeptNurses, setFromDeptNurses] = useState([]);
   const [scheduleSecondments, setScheduleSecondments] = useState([]);
+  const [versionDrawerVisible, setVersionDrawerVisible] = useState(false);
+  const [scheduleVersions, setScheduleVersions] = useState([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [selectedVersionIds, setSelectedVersionIds] = useState([]);
+  const [compareResult, setCompareResult] = useState(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [rollbackTargetVersion, setRollbackTargetVersion] = useState(null);
+  const [rollbackModalVisible, setRollbackModalVisible] = useState(false);
+  const [rollbackConflicts, setRollbackConflicts] = useState(null);
+  const [rollbackLoading, setRollbackLoading] = useState(false);
 
   const fatigueMap = {};
   (fatigueData || []).forEach(f => {
@@ -414,6 +426,107 @@ function SchedulePage() {
     } catch (err) {
       setLentOutNurses([]);
     }
+  };
+
+  const loadScheduleVersions = async () => {
+    if (!selectedDept) return;
+    setVersionsLoading(true);
+    setCompareResult(null);
+    setSelectedVersionIds([]);
+    try {
+      const res = await getScheduleVersions(selectedDept.id, month.format('YYYY-MM'));
+      setScheduleVersions(res.data);
+    } catch (err) {
+      message.error('加载版本列表失败');
+      setScheduleVersions([]);
+    }
+    setVersionsLoading(false);
+  };
+
+  const openVersionDrawer = async () => {
+    setVersionDrawerVisible(true);
+    await loadScheduleVersions();
+  };
+
+  const handleVersionSelect = (versionId) => {
+    setCompareResult(null);
+    let newSelected;
+    if (selectedVersionIds.includes(versionId)) {
+      newSelected = selectedVersionIds.filter(id => id !== versionId);
+    } else {
+      if (selectedVersionIds.length >= 2) {
+        newSelected = [selectedVersionIds[1], versionId];
+      } else {
+        newSelected = [...selectedVersionIds, versionId];
+      }
+    }
+    setSelectedVersionIds(newSelected);
+  };
+
+  const handleCompareVersions = async () => {
+    if (selectedVersionIds.length !== 2) {
+      message.warning('请选择两个版本进行对比');
+      return;
+    }
+    setCompareLoading(true);
+    try {
+      const res = await compareScheduleVersions(
+        selectedDept.id,
+        selectedVersionIds[0],
+        selectedVersionIds[1]
+      );
+      setCompareResult(res.data);
+    } catch (err) {
+      message.error('对比版本失败');
+      setCompareResult(null);
+    }
+    setCompareLoading(false);
+  };
+
+  const handleOpenRollbackModal = (version) => {
+    setRollbackTargetVersion(version);
+    setRollbackConflicts(null);
+    setRollbackModalVisible(true);
+  };
+
+  const handleRollback = async (force = false) => {
+    if (!rollbackTargetVersion) return;
+    setRollbackLoading(true);
+    try {
+      await rollbackScheduleVersion(selectedDept.id, rollbackTargetVersion.id, force);
+      message.success(`成功回溯至V${rollbackTargetVersion.version_number}版本`);
+      setRollbackModalVisible(false);
+      setRollbackTargetVersion(null);
+      setRollbackConflicts(null);
+      loadSchedule();
+      loadMonthlyReport();
+      loadFatigueStatus();
+      loadSkillCoverageReport();
+      loadScheduleVersions();
+    } catch (err) {
+      if (err.response?.status === 409 && err.response?.data?.conflicts) {
+        setRollbackConflicts(err.response.data.conflicts);
+        message.warning('存在冲突的已审批记录');
+      } else {
+        message.error(`回溯失败: ${err.response?.data?.error || err.message}`);
+      }
+    }
+    setRollbackLoading(false);
+  };
+
+  const getDiffInfo = (nurseId, dateStr) => {
+    if (!compareResult) return null;
+    return compareResult.differences.find(
+      d => d.nurse_id === nurseId && d.date === dateStr
+    );
+  };
+
+  const OPERATION_TYPE_COLORS = {
+    auto_generate: 'green',
+    manual_adjust: 'blue',
+    swap_effective: 'purple',
+    substitute_effective: 'cyan',
+    version_rollback: 'orange'
   };
 
   const handleSecondmentSubmit = async () => {
@@ -1587,6 +1700,9 @@ function SchedulePage() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
+            <Button onClick={openVersionDrawer}>
+              版本历史
+            </Button>
             <Button onClick={() => {
               leaveForm.resetFields();
               setLeaveModalVisible(true);
@@ -1619,6 +1735,46 @@ function SchedulePage() {
               expanded={fatigueBannerExpanded} 
               onToggle={() => setFatigueBannerExpanded(!fatigueBannerExpanded)} 
             />
+            {compareResult && (
+              <Alert
+                type="info"
+                showIcon
+                closable
+                onClose={() => { setCompareResult(null); setSelectedVersionIds([]); }}
+                style={{ marginBottom: '16px' }}
+                message={
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span>
+                      <strong>版本对比模式</strong>：
+                      V{compareResult.version_a.version_number} → V{compareResult.version_b.version_number}，
+                      共 <strong style={{ color: '#1890ff' }}>{compareResult.difference_count}</strong> 处差异
+                      （新增 <Tag color="green" style={{ margin: '0 2px' }}>{compareResult.added_count}</Tag>，
+                      移除 <Tag color="red" style={{ margin: '0 2px' }}>{compareResult.removed_count}</Tag>，
+                      变更 <Tag color="orange" style={{ margin: '0 2px' }}>{compareResult.changed_count}</Tag>）
+                    </span>
+                    <Button size="small" onClick={() => { setCompareResult(null); setSelectedVersionIds([]); }}>
+                      退出对比
+                    </Button>
+                  </div>
+                }
+                description={
+                  <div style={{ display: 'flex', gap: '24px', marginTop: '4px', fontSize: '12px', color: '#666' }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <div style={{ width: '16px', height: '16px', background: '#f6ffed', border: '2px solid #52c41a', borderRadius: '2px' }}></div>
+                      新增班次
+                    </span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <div style={{ width: '16px', height: '16px', background: '#fff1f0', border: '2px solid #ff4d4f', borderRadius: '2px' }}></div>
+                      移除班次
+                    </span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <div style={{ width: '16px', height: '16px', background: '#fff7e6', border: '2px solid #fa8c16', borderRadius: '2px' }}></div>
+                      班次变更
+                    </span>
+                  </div>
+                }
+              />
+            )}
             <div style={{ background: '#fff', padding: '24px', borderRadius: '8px', marginBottom: '24px' }}>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: days.length * 70 + 150 }}>
@@ -1680,22 +1836,57 @@ function SchedulePage() {
                             const leave = getLeaveForNurseAndDate(nurse.id, day);
                             const subInfo = getSubstituteInfoForDate(day).find(s => s.substitute_nurse_id === nurse.id);
                             const subOriginalShift = subInfo ? getSubstituteShiftForDate(nurse.id, day) : null;
+                            const diffInfo = compareResult ? getDiffInfo(nurse.id, dateStr) : null;
 
                             const isLeave = leave && shift;
                             const isSubstitute = subInfo && !isLeave;
                             const isSecondmentShift = shift && shift.is_secondment;
 
+                            let cellBackground = isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : (isFatigue ? '#fffbe6' : (isLentOut || isBorrowed ? '#f9f0ff' : 'transparent')));
+                            let cellBorderStyle = '1px solid #e8e8e8';
+                            if (diffInfo) {
+                              if (diffInfo.change_type === 'added') {
+                                cellBackground = '#f6ffed';
+                                cellBorderStyle = '2px solid #52c41a';
+                              } else if (diffInfo.change_type === 'removed') {
+                                cellBackground = '#fff1f0';
+                                cellBorderStyle = '2px solid #ff4d4f';
+                              } else if (diffInfo.change_type === 'changed') {
+                                cellBackground = '#fff7e6';
+                                cellBorderStyle = '2px solid #fa8c16';
+                              }
+                            }
+
                             return (
                               <td 
                                 key={dateStr} 
                                 style={{ 
-                                  border: '1px solid #e8e8e8', 
+                                  border: cellBorderStyle, 
                                   padding: '4px', 
                                   textAlign: 'center', 
                                   verticalAlign: 'top',
-                                  background: isLeave ? '#fff1f0' : (isSubstitute ? '#e6fffb' : (isFatigue ? '#fffbe6' : (isLentOut || isBorrowed ? '#f9f0ff' : 'transparent')))
+                                  background: cellBackground
                                 }}
                               >
+                                {diffInfo && (
+                                  <Tooltip title={`${diffInfo.from_shift_name || '无班次'} → ${diffInfo.to_shift_name || '无班次'}`}>
+                                    <div style={{
+                                      position: 'absolute',
+                                      top: 0,
+                                      right: 0,
+                                      fontSize: '10px',
+                                      padding: '1px 4px',
+                                      background: diffInfo.change_type === 'added' ? '#52c41a' : 
+                                                 diffInfo.change_type === 'removed' ? '#ff4d4f' : '#fa8c16',
+                                      color: '#fff',
+                                      borderBottomLeftRadius: '4px',
+                                      zIndex: 10
+                                    }}>
+                                      {diffInfo.change_type === 'added' ? '+新增' : 
+                                       diffInfo.change_type === 'removed' ? '-移除' : '↔变更'}
+                                    </div>
+                                  </Tooltip>
+                                )}
                                 {shift && !isSubstitute && (
                                   <div 
                                     style={{ 
@@ -1707,17 +1898,59 @@ function SchedulePage() {
                                       marginBottom: '4px',
                                       cursor: 'pointer',
                                       textDecoration: isLeave ? 'line-through' : 'none',
-                                      border: isSecondmentShift ? '2px dashed #531dab' : 'none'
+                                      border: isSecondmentShift ? '2px dashed #531dab' : 'none',
+                                      position: 'relative'
                                     }}
                                     onClick={() => handleCellClick(nurse, dateStr, shift.shift, shift.id)}
                                   >
                                     {isLeave ? `请假(${LEAVE_TYPE_NAMES[leave.leave_type]})` : SHIFT_NAMES[shift.shift]}
+                                    {diffInfo && diffInfo.change_type === 'changed' && (
+                                      <div style={{
+                                        fontSize: '10px',
+                                        marginTop: '2px',
+                                        color: '#fffbdd',
+                                        textDecoration: 'none',
+                                        lineHeight: 1
+                                      }}>
+                                        {diffInfo.from_shift_name || '无'} → {diffInfo.to_shift_name || '无'}
+                                      </div>
+                                    )}
                                     {isSecondmentShift && !isLeave && <span style={{ marginLeft: '2px', fontSize: '10px' }}>借</span>}
                                     {shiftSkillReqs.filter(r => r.shift === shift.shift).length > 0 && !isLeave && (
                                       <Tooltip title={`技能要求: ${shiftSkillReqs.filter(r => r.shift === shift.shift).map(r => r.skill_name).join(', ')}`}>
                                         <span style={{ marginLeft: '4px', fontSize: '10px' }}>🔧</span>
                                       </Tooltip>
                                     )}
+                                  </div>
+                                )}
+                                {!shift && diffInfo && diffInfo.change_type === 'removed' && (
+                                  <div 
+                                    style={{ 
+                                      padding: '4px 8px', 
+                                      borderRadius: '4px', 
+                                      color: '#fff', 
+                                      fontSize: '12px',
+                                      background: '#ff4d4f',
+                                      marginBottom: '4px',
+                                      textDecoration: 'line-through',
+                                      opacity: 0.7
+                                    }}
+                                  >
+                                    {diffInfo.from_shift_name}
+                                  </div>
+                                )}
+                                {!shift && diffInfo && diffInfo.change_type === 'added' && (
+                                  <div 
+                                    style={{ 
+                                      padding: '4px 8px', 
+                                      borderRadius: '4px', 
+                                      color: '#fff', 
+                                      fontSize: '12px',
+                                      background: '#52c41a',
+                                      marginBottom: '4px'
+                                    }}
+                                  >
+                                    {diffInfo.to_shift_name}
                                   </div>
                                 )}
                                 {isSubstitute && (
@@ -2424,6 +2657,419 @@ function SchedulePage() {
             <TextArea rows={3} placeholder="请输入借调原因（可选）" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Drawer
+        title="版本历史"
+        placement="right"
+        width={560}
+        open={versionDrawerVisible}
+        onClose={() => {
+          setVersionDrawerVisible(false);
+          setCompareResult(null);
+          setSelectedVersionIds([]);
+        }}
+        extra={
+          <Space>
+            <span style={{ fontSize: '12px', color: '#999' }}>
+              已选 {selectedVersionIds.length}/2 个版本
+            </span>
+            <Button
+              size="small"
+              type="primary"
+              disabled={selectedVersionIds.length !== 2}
+              loading={compareLoading}
+              onClick={handleCompareVersions}
+            >
+              对比选中版本
+            </Button>
+            <Button size="small" onClick={loadScheduleVersions}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        {versionsLoading ? (
+          <div style={{ textAlign: 'center', padding: '40px 0', color: '#999' }}>加载中...</div>
+        ) : scheduleVersions.length === 0 ? (
+          <Empty
+            description="暂无版本记录"
+            style={{ marginTop: '80px' }}
+          />
+        ) : (
+          <div>
+            <div style={{ marginBottom: '16px', fontSize: '13px', color: '#666' }}>
+              <Alert
+                type="info"
+                showIcon
+                message="点击版本卡片选择要对比的版本（最多2个），或直接点击「回溯到此版本」恢复该版本排班"
+                style={{ marginBottom: 0 }}
+              />
+            </div>
+
+            {compareResult && (
+              <div style={{ marginBottom: '16px', padding: '12px', background: '#f0f5ff', borderRadius: '6px', border: '1px solid #d6e4ff' }}>
+                <div style={{ fontWeight: '600', marginBottom: '8px', color: '#1890ff' }}>
+                  对比结果
+                </div>
+                <Descriptions size="small" column={3} bordered>
+                  <Descriptions.Item label="差异总数">
+                    <strong style={{ color: '#1890ff' }}>{compareResult.difference_count}</strong> 处
+                  </Descriptions.Item>
+                  <Descriptions.Item label="新增班次">
+                    <Tag color="green">{compareResult.added_count}</Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="移除班次">
+                    <Tag color="red">{compareResult.removed_count}</Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="班次变更">
+                    <Tag color="orange">{compareResult.changed_count}</Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="版本A" span={2}>
+                    V{compareResult.version_a.version_number} - {compareResult.version_a.operation_type_name}
+                    <div style={{ fontSize: '11px', color: '#999' }}>{compareResult.version_a.created_at}</div>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="版本B">
+                    V{compareResult.version_b.version_number} - {compareResult.version_b.operation_type_name}
+                    <div style={{ fontSize: '11px', color: '#999' }}>{compareResult.version_b.created_at}</div>
+                  </Descriptions.Item>
+                </Descriptions>
+                {compareResult.differences.length > 0 && (
+                  <div style={{ marginTop: '12px', maxHeight: '240px', overflowY: 'auto' }}>
+                    <div style={{ fontSize: '12px', fontWeight: '500', marginBottom: '6px' }}>差异明细：</div>
+                    <Table
+                      size="small"
+                      pagination={false}
+                      dataSource={compareResult.differences}
+                      rowKey={(r, i) => `${r.nurse_id}-${r.date}-${i}`}
+                      columns={[
+                        {
+                          title: '日期',
+                          dataIndex: 'date',
+                          key: 'date',
+                          width: 100,
+                          render: v => v.substring(5)
+                        },
+                        {
+                          title: '护士',
+                          dataIndex: 'nurse_name',
+                          key: 'nurse_name',
+                          width: 80
+                        },
+                        {
+                          title: '类型',
+                          dataIndex: 'change_type',
+                          key: 'change_type',
+                          width: 70,
+                          align: 'center',
+                          render: v => (
+                            <Tag color={
+                              v === 'added' ? 'green' :
+                              v === 'removed' ? 'red' : 'orange'
+                            }>
+                              {v === 'added' ? '新增' : v === 'removed' ? '移除' : '变更'}
+                            </Tag>
+                          )
+                        },
+                        {
+                          title: '变化',
+                          key: 'diff',
+                          render: (_, r) => (
+                            <span style={{ fontSize: '12px' }}>
+                              <span style={{ color: r.from_shift_name ? '#666' : '#bbb', textDecoration: r.from_shift_name ? 'none' : 'line-through' }}>
+                                {r.from_shift_name || '无'}
+                              </span>
+                              <span style={{ margin: '0 4px', color: '#999' }}>→</span>
+                              <span style={{ color: r.to_shift_name ? '#1890ff' : '#bbb' }}>
+                                {r.to_shift_name || '无'}
+                              </span>
+                            </span>
+                          )
+                        }
+                      ]}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            <Timeline
+              mode="left"
+              items={scheduleVersions.map((v, idx) => ({
+                color: OPERATION_TYPE_COLORS[v.operation_type] || 'blue',
+                dot: selectedVersionIds.includes(v.id) ? (
+                  <div style={{
+                    width: '20px',
+                    height: '20px',
+                    borderRadius: '50%',
+                    background: OPERATION_TYPE_COLORS[v.operation_type] || 'blue',
+                    border: '2px solid #fff',
+                    boxShadow: '0 0 0 2px #1890ff',
+                    color: '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '12px',
+                    fontWeight: 'bold'
+                  }}>
+                    ✓
+                  </div>
+                ) : undefined,
+                label: (
+                  <div style={{ fontSize: '12px', color: '#999' }}>
+                    {dayjs(v.created_at).format('MM-DD HH:mm')}
+                  </div>
+                ),
+                children: (
+                  <div
+                    onClick={() => handleVersionSelect(v.id)}
+                    style={{
+                      padding: '12px',
+                      borderRadius: '6px',
+                      border: selectedVersionIds.includes(v.id) 
+                        ? `2px solid ${OPERATION_TYPE_COLORS[v.operation_type] || 'blue'}`
+                        : '1px solid #e8e8e8',
+                      background: selectedVersionIds.includes(v.id) 
+                        ? `${OPERATION_TYPE_COLORS[v.operation_type] === 'green' ? '#f6ffed' : 
+                           OPERATION_TYPE_COLORS[v.operation_type] === 'orange' ? '#fff7e6' :
+                           OPERATION_TYPE_COLORS[v.operation_type] === 'red' ? '#fff1f0' :
+                           OPERATION_TYPE_COLORS[v.operation_type] === 'purple' ? '#f9f0ff' :
+                           OPERATION_TYPE_COLORS[v.operation_type] === 'cyan' ? '#e6fffb' : '#e6f7ff'}`
+                        : '#fafafa',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                      marginBottom: idx === scheduleVersions.length - 1 ? '0' : '8px'
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontWeight: 'bold', fontSize: '16px', color: OPERATION_TYPE_COLORS[v.operation_type] }}>
+                          V{v.version_number}
+                        </span>
+                        <Tag color={OPERATION_TYPE_COLORS[v.operation_type]} style={{ margin: 0 }}>
+                          {v.operation_type_name}
+                        </Tag>
+                      </div>
+                      <Popconfirm
+                        title={`确定要回溯到V${v.version_number}版本吗？`}
+                        description={`操作时间：${v.created_at}，操作类型：${v.operation_type_name}`}
+                        onConfirm={(e) => {
+                          e.stopPropagation();
+                          handleOpenRollbackModal(v);
+                        }}
+                        okText="确认回溯"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                      >
+                        <Button
+                          size="small"
+                          danger
+                          type="link"
+                          style={{ padding: 0 }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          回溯到此版本
+                        </Button>
+                      </Popconfirm>
+                    </div>
+                    {v.operator_name && (
+                      <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
+                        操作人：{v.operator_name}
+                      </div>
+                    )}
+                    {v.remark && (
+                      <div style={{ fontSize: '12px', color: '#999', marginTop: '4px' }}>
+                        备注：{v.remark}
+                      </div>
+                    )}
+                    <div style={{ fontSize: '11px', color: '#bbb', marginTop: '6px' }}>
+                      {v.created_at}
+                    </div>
+                  </div>
+                )
+              }))}
+            />
+          </div>
+        )}
+      </Drawer>
+
+      <Modal
+        title="版本回溯确认"
+        open={rollbackModalVisible}
+        onCancel={() => {
+          setRollbackModalVisible(false);
+          setRollbackTargetVersion(null);
+          setRollbackConflicts(null);
+        }}
+        footer={
+          rollbackConflicts ? (
+            <Space>
+              <Button onClick={() => {
+                setRollbackModalVisible(false);
+                setRollbackTargetVersion(null);
+                setRollbackConflicts(null);
+              }}>
+                返回处理
+              </Button>
+              <Button
+                type="primary"
+                danger
+                loading={rollbackLoading}
+                onClick={() => handleRollback(true)}
+              >
+                强制回溯（不建议）
+              </Button>
+            </Space>
+          ) : (
+            <Space>
+              <Button onClick={() => {
+                setRollbackModalVisible(false);
+                setRollbackTargetVersion(null);
+                setRollbackConflicts(null);
+              }}>
+                取消
+              </Button>
+              <Button
+                type="primary"
+                danger
+                loading={rollbackLoading}
+                onClick={() => handleRollback(false)}
+              >
+                确认回溯
+              </Button>
+            </Space>
+          )
+        }
+        width={600}
+      >
+        {rollbackTargetVersion && (
+          <div>
+            <Alert
+              type="warning"
+              showIcon
+              message={
+                <div>
+                  确认将排班表回溯到 <strong>V{rollbackTargetVersion.version_number}</strong> 版本？
+                </div>
+              }
+              description={
+                <div>
+                  <div>操作时间：{rollbackTargetVersion.created_at}</div>
+                  <div>操作类型：<Tag color={OPERATION_TYPE_COLORS[rollbackTargetVersion.operation_type]}>{rollbackTargetVersion.operation_type_name}</Tag></div>
+                  {rollbackTargetVersion.operator_name && <div>操作人：{rollbackTargetVersion.operator_name}</div>}
+                  {rollbackTargetVersion.remark && <div>备注：{rollbackTargetVersion.remark}</div>}
+                </div>
+              }
+              style={{ marginBottom: '16px' }}
+            />
+
+            {rollbackConflicts && (
+              <div style={{ marginBottom: '16px' }}>
+                <Alert
+                  type="error"
+                  showIcon
+                  message={
+                    <div>
+                      <strong>检测到冲突！</strong> 该版本之后存在 <strong>{rollbackConflicts.swap_count + rollbackConflicts.substitute_count}</strong> 条已审批的换班/补班记录，回溯可能导致数据不一致。
+                    </div>
+                  }
+                  description="建议先在换班审批或请假审批中取消以下记录后，再执行回溯操作，或点击「强制回溯」继续（可能导致排班数据与审批记录不匹配）。"
+                  style={{ marginBottom: '12px' }}
+                />
+
+                {rollbackConflicts.swap_conflicts.length > 0 && (
+                  <div style={{ marginBottom: '12px' }}>
+                    <div style={{ fontWeight: '500', marginBottom: '6px', color: '#722ed1' }}>
+                      已审批通过的换班记录（{rollbackConflicts.swap_conflicts.length}条）：
+                    </div>
+                    <div style={{ maxHeight: '150px', overflowY: 'auto', border: '1px solid #f0e6ff', borderRadius: '4px' }}>
+                      <Table
+                        size="small"
+                        pagination={false}
+                        dataSource={rollbackConflicts.swap_conflicts}
+                        rowKey="id"
+                        columns={[
+                          { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
+                          {
+                            title: '换班详情',
+                            key: 'detail',
+                            render: (_, r) => (
+                              <span style={{ fontSize: '12px' }}>
+                                <strong>{r.requester_name}</strong>（{SHIFT_NAMES[r.requester_shift]}）
+                                <span style={{ margin: '0 4px' }}>↔</span>
+                                <strong>{r.target_name}</strong>（{SHIFT_NAMES[r.target_shift]}）
+                              </span>
+                            )
+                          },
+                          {
+                            title: '审批时间',
+                            dataIndex: 'created_at',
+                            key: 'created_at',
+                            width: 140,
+                            render: v => dayjs(v).format('MM-DD HH:mm')
+                          }
+                        ]}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {rollbackConflicts.substitute_conflicts.length > 0 && (
+                  <div>
+                    <div style={{ fontWeight: '500', marginBottom: '6px', color: '#13c2c2' }}>
+                      已确认补班的请假记录（{rollbackConflicts.substitute_conflicts.length}条）：
+                    </div>
+                    <div style={{ maxHeight: '150px', overflowY: 'auto', border: '1px solid #e6fffb', borderRadius: '4px' }}>
+                      <Table
+                        size="small"
+                        pagination={false}
+                        dataSource={rollbackConflicts.substitute_conflicts}
+                        rowKey="id"
+                        columns={[
+                          { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
+                          {
+                            title: '请假护士',
+                            dataIndex: 'nurse_name',
+                            key: 'nurse_name',
+                            width: 80,
+                            render: (text, r) => (
+                              <span>
+                                {text}
+                                <Tag color={LEAVE_TYPE_COLORS[r.leave_type]} style={{ marginLeft: 4 }}>
+                                  {LEAVE_TYPE_NAMES[r.leave_type]}
+                                </Tag>
+                              </span>
+                            )
+                          },
+                          {
+                            title: '补班护士',
+                            dataIndex: 'substitute_name',
+                            key: 'substitute_name',
+                            width: 80,
+                            render: text => text || '-'
+                          },
+                          {
+                            title: '审批时间',
+                            dataIndex: 'created_at',
+                            key: 'created_at',
+                            width: 140,
+                            render: v => dayjs(v).format('MM-DD HH:mm')
+                          }
+                        ]}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <Alert
+              type="info"
+              showIcon
+              message="回溯后系统将自动生成一条新版本记录（操作类型：版本回溯），当前排班表将被替换为目标版本的内容。"
+            />
+          </div>
+        )}
       </Modal>
     </Layout>
   );

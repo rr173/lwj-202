@@ -492,6 +492,24 @@ db.serialize(() => {
     FOREIGN KEY (operation_execution_id) REFERENCES care_path_operation_executions(id),
     FOREIGN KEY (handled_by) REFERENCES nurses(id)
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS schedule_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    operation_type TEXT NOT NULL CHECK(operation_type IN ('auto_generate', 'manual_adjust', 'swap_effective', 'substitute_effective', 'version_rollback')),
+    operator_id INTEGER,
+    operator_name TEXT,
+    remark TEXT,
+    snapshot TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (operator_id) REFERENCES nurses(id),
+    UNIQUE(department_id, month, version_number)
+  )`);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_schedule_versions_dept_month ON schedule_versions(department_id, month);`);
 });
 
 module.exports = db;

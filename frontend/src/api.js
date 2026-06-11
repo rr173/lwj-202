@@ -315,4 +315,18 @@ export const handleCarePathWarning = (id, handledBy) =>
 export const getCarePathStatistics = (deptId, month) =>
   api.get('/care-path-statistics/overview', { params: { department_id: deptId, month } });
 
+export const getScheduleVersions = (deptId, month) =>
+  api.get(`/departments/${deptId}/schedule-versions`, { params: { month } });
+
+export const getScheduleVersion = (versionId) =>
+  api.get(`/schedule-versions/${versionId}`);
+
+export const compareScheduleVersions = (deptId, versionAId, versionBId) =>
+  api.get(`/departments/${deptId}/schedule-versions/compare`, {
+    params: { version_a_id: versionAId, version_b_id: versionBId }
+  });
+
+export const rollbackScheduleVersion = (deptId, versionId, force) =>
+  api.post(`/departments/${deptId}/schedule-versions/${versionId}/rollback`, { force });
+
 export default api;
