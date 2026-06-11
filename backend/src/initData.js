@@ -59,6 +59,13 @@ async function initDemoData() {
     await runAsync('DELETE FROM supply_requisitions');
     await runAsync('DELETE FROM supply_batches');
     await runAsync('DELETE FROM medical_supplies');
+    await runAsync('DELETE FROM care_path_warnings');
+    await runAsync('DELETE FROM care_path_operation_executions');
+    await runAsync('DELETE FROM care_path_stage_executions');
+    await runAsync('DELETE FROM patient_care_paths');
+    await runAsync('DELETE FROM care_path_operations');
+    await runAsync('DELETE FROM care_path_stages');
+    await runAsync('DELETE FROM care_path_templates');
     await runAsync('DELETE FROM nurses');
     await runAsync('DELETE FROM departments');
 
@@ -548,6 +555,235 @@ async function initDemoData() {
         await runAsync('UPDATE supply_batches SET is_expired = 1 WHERE id = ?', [bid]);
       }
     }
+
+    const pathTemplates = [
+      {
+        name: '术后恢复护理路径',
+        applicable_disease: '术后恢复',
+        stages: [
+          {
+            name: '术后监护期',
+            duration_hours: 6,
+            operations: [
+              { name: '生命体征监测（每15分钟）', is_critical: 1 },
+              { name: '伤口渗血观察', is_critical: 1 },
+              { name: '引流管护理', is_critical: 0 },
+              { name: '疼痛评估', is_critical: 0 }
+            ]
+          },
+          {
+            name: '术后恢复期',
+            duration_hours: 24,
+            operations: [
+              { name: '生命体征监测（每1小时）', is_critical: 1 },
+              { name: '协助翻身拍背', is_critical: 1 },
+              { name: '饮食指导', is_critical: 0 },
+              { name: '早期活动指导', is_critical: 0 },
+              { name: '输液观察', is_critical: 1 }
+            ]
+          },
+          {
+            name: '出院准备期',
+            duration_hours: 12,
+            operations: [
+              { name: '出院健康宣教', is_critical: 1 },
+              { name: '伤口换药', is_critical: 0 },
+              { name: '用药指导', is_critical: 1 },
+              { name: '复诊预约', is_critical: 0 }
+            ]
+          }
+        ]
+      },
+      {
+        name: '脑卒中护理路径',
+        applicable_disease: '脑卒中',
+        stages: [
+          {
+            name: '急性期（24h内）',
+            duration_hours: 24,
+            operations: [
+              { name: '意识瞳孔评估（每15分钟）', is_critical: 1 },
+              { name: '生命体征监测', is_critical: 1 },
+              { name: '肢体活动度评估', is_critical: 1 },
+              { name: '气道管理', is_critical: 1 },
+              { name: '血糖监测', is_critical: 0 }
+            ]
+          },
+          {
+            name: '稳定期（1-7天）',
+            duration_hours: 72,
+            operations: [
+              { name: '神经功能评估（每班）', is_critical: 1 },
+              { name: '压疮预防护理', is_critical: 1 },
+              { name: '早期康复训练', is_critical: 0 },
+              { name: '吞咽功能评估', is_critical: 1 },
+              { name: '心理护理', is_critical: 0 }
+            ]
+          },
+          {
+            name: '康复期',
+            duration_hours: 96,
+            operations: [
+              { name: '肢体功能锻炼指导', is_critical: 1 },
+              { name: '日常生活能力训练', is_critical: 0 },
+              { name: '二级预防宣教', is_critical: 1 },
+              { name: '出院评估', is_critical: 1 }
+            ]
+          }
+        ]
+      }
+    ];
+
+    const templateIds = [];
+    for (const tpl of pathTemplates) {
+      const tplResult = await runAsync(
+        'INSERT INTO care_path_templates (name, department_id, applicable_disease) VALUES (?, ?, ?)',
+        [tpl.name, deptId, tpl.applicable_disease]
+      );
+      const tplId = tplResult.lastID;
+      const stageIds = [];
+
+      for (let sIdx = 0; sIdx < tpl.stages.length; sIdx++) {
+        const stage = tpl.stages[sIdx];
+        const stageResult = await runAsync(
+          'INSERT INTO care_path_stages (template_id, stage_order, name, duration_hours) VALUES (?, ?, ?, ?)',
+          [tplId, sIdx, stage.name, stage.duration_hours]
+        );
+        const stageId = stageResult.lastID;
+        stageIds.push({ id: stageId, duration_hours: stage.duration_hours, operations: stage.operations });
+
+        for (let oIdx = 0; oIdx < stage.operations.length; oIdx++) {
+          const op = stage.operations[oIdx];
+          await runAsync(
+            'INSERT INTO care_path_operations (stage_id, operation_order, name, is_critical) VALUES (?, ?, ?, ?)',
+            [stageId, oIdx, op.name, op.is_critical]
+          );
+        }
+      }
+      templateIds.push({ id: tplId, stageIds, name: tpl.name });
+    }
+
+    const demoPatients = [
+      {
+        patient_bed: '3床',
+        patient_name: '王建国',
+        template_idx: 0,
+        hours_ago: 8,
+        progress: 'in_progress'
+      },
+      {
+        patient_bed: '7床',
+        patient_name: '李秀英',
+        template_idx: 1,
+        hours_ago: 30,
+        progress: 'overdue'
+      },
+      {
+        patient_bed: '12床',
+        patient_name: '张桂兰',
+        template_idx: 0,
+        hours_ago: 60,
+        progress: 'completed'
+      }
+    ];
+
+    for (const patient of demoPatients) {
+      const tpl = templateIds[patient.template_idx];
+      const startTime = dayjs().subtract(patient.hours_ago, 'hour');
+
+      const pathResult = await runAsync(
+        `INSERT INTO patient_care_paths (template_id, department_id, patient_bed, patient_name, status, current_stage_index, start_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [tpl.id, deptId, patient.patient_bed, patient.patient_name,
+         patient.progress === 'completed' ? 'completed' : 'active',
+         patient.progress === 'completed' ? tpl.stageIds.length : (patient.progress === 'overdue' ? 0 : 0),
+         startTime.format('YYYY-MM-DD HH:mm:ss')]
+      );
+      const patientPathId = pathResult.lastID;
+
+      let cumulativeHours = 0;
+      for (let sIdx = 0; sIdx < tpl.stageIds.length; sIdx++) {
+        const stage = tpl.stageIds[sIdx];
+        cumulativeHours += stage.duration_hours;
+        const deadlineTime = startTime.add(cumulativeHours, 'hour');
+
+        let stageStatus, actualStart, actualEnd;
+        if (patient.progress === 'completed') {
+          stageStatus = 'completed';
+          actualStart = startTime.add(cumulativeHours - stage.duration_hours, 'hour').format('YYYY-MM-DD HH:mm:ss');
+          actualEnd = startTime.add(cumulativeHours - stage.duration_hours / 2, 'hour').format('YYYY-MM-DD HH:mm:ss');
+        } else if (sIdx === 0) {
+          stageStatus = 'in_progress';
+          actualStart = startTime.format('YYYY-MM-DD HH:mm:ss');
+          actualEnd = null;
+        } else {
+          stageStatus = 'pending';
+          actualStart = null;
+          actualEnd = null;
+        }
+
+        const stageExecResult = await runAsync(
+          `INSERT INTO care_path_stage_executions (patient_path_id, stage_id, stage_index, deadline_time, actual_start_time, actual_end_time, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [patientPathId, stage.id, sIdx, deadlineTime.format('YYYY-MM-DD HH:mm:ss'), actualStart, actualEnd, stageStatus]
+        );
+        const stageExecId = stageExecResult.lastID;
+
+        for (let oIdx = 0; oIdx < stage.operations.length; oIdx++) {
+          const opInfo = stage.operations[oIdx];
+
+          let opStatus, signedBy, signedByName, signedAt;
+          if (patient.progress === 'completed') {
+            opStatus = 'completed';
+            signedBy = nurseIds[2].id;
+            signedByName = nurseIds[2].name;
+            signedAt = startTime.add(cumulativeHours - stage.duration_hours / 2, 'hour').format('YYYY-MM-DD HH:mm:ss');
+          } else if (patient.progress === 'overdue' && sIdx === 0 && oIdx >= 2) {
+            opStatus = 'pending';
+            signedBy = null;
+            signedByName = null;
+            signedAt = null;
+          } else if (sIdx === 0 && oIdx < (patient.progress === 'in_progress' ? 2 : 2)) {
+            opStatus = 'completed';
+            signedBy = nurseIds[3].id;
+            signedByName = nurseIds[3].name;
+            signedAt = startTime.add(oIdx * 0.5, 'hour').format('YYYY-MM-DD HH:mm:ss');
+          } else {
+            opStatus = 'pending';
+            signedBy = null;
+            signedByName = null;
+            signedAt = null;
+          }
+
+          const opExecResult = await runAsync(
+            `INSERT INTO care_path_operation_executions (stage_execution_id, operation_id, status, signed_by, signed_by_name, signed_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [stageExecId, await getAsync('SELECT id FROM care_path_operations WHERE stage_id = ? AND operation_order = ?', [stage.id, oIdx]).then(r => r.id),
+             opStatus, signedBy, signedByName, signedAt]
+          );
+          const opExecId = opExecResult.lastID;
+
+          if (patient.progress === 'overdue' && sIdx === 0 && opInfo.is_critical && opStatus === 'pending') {
+            const overdueMinutes = dayjs().diff(deadlineTime, 'minute');
+            await runAsync(
+              `INSERT INTO care_path_warnings (patient_path_id, department_id, operation_execution_id, patient_bed, operation_name, overdue_minutes)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [patientPathId, deptId, opExecId, patient.patient_bed, opInfo.name, Math.max(overdueMinutes, 60)]
+            );
+          }
+        }
+      }
+
+      if (patient.progress === 'completed') {
+        await runAsync(
+          'UPDATE patient_care_paths SET completed_time = ? WHERE id = ?',
+          [startTime.add(patient.hours_ago - 5, 'hour').format('YYYY-MM-DD HH:mm:ss'), patientPathId]
+        );
+      }
+    }
+
+    console.log(`护理路径模板数: ${pathTemplates.length}`);
+    console.log(`患者路径数: ${demoPatients.length} (进行中/有超时/已完结)`);
 
     await runAsync('COMMIT');
 

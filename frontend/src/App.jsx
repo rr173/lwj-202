@@ -6,6 +6,7 @@ import EventPage from './EventPage';
 import HandoverPage from './HandoverPage';
 import AssessmentPage from './AssessmentPage';
 import SuppliesPage from './SuppliesPage';
+import CarePathPage from './CarePathPage';
 
 const { Header } = Layout;
 
@@ -20,6 +21,7 @@ function App() {
       case 'handover': return <HandoverPage />;
       case 'assessment': return <AssessmentPage />;
       case 'supplies': return <SuppliesPage />;
+      case 'carepath': return <CarePathPage />;
       default: return <SchedulePage />;
     }
   };
@@ -40,7 +42,8 @@ function App() {
               { key: 'event', label: '事件管理' },
               { key: 'handover', label: '交接班' },
               { key: 'assessment', label: '考核管理' },
-              { key: 'supplies', label: '耗材管理' }
+              { key: 'supplies', label: '耗材管理' },
+              { key: 'carepath', label: '护理路径' }
             ]}
           />
         </div>

@@ -279,4 +279,40 @@ export const getSupplyWarnings = (deptId) =>
 export const getSupplyMonthlyStatistics = (deptId, month) =>
   api.get(`/departments/${deptId}/supply-monthly-statistics`, { params: { month } });
 
+export const getCarePathTemplates = (deptId) =>
+  api.get('/care-path-templates', { params: deptId ? { department_id: deptId } : {} });
+
+export const getCarePathTemplate = (id) =>
+  api.get(`/care-path-templates/${id}`);
+
+export const createCarePathTemplate = (data) =>
+  api.post('/care-path-templates', data);
+
+export const updateCarePathTemplate = (id, data) =>
+  api.put(`/care-path-templates/${id}`, data);
+
+export const deleteCarePathTemplate = (id) =>
+  api.delete(`/care-path-templates/${id}`);
+
+export const createPatientCarePath = (data) =>
+  api.post('/patient-care-paths', data);
+
+export const getActivePatientCarePaths = (deptId) =>
+  api.get('/patient-care-paths/active', { params: deptId ? { department_id: deptId } : {} });
+
+export const getPatientCarePath = (id) =>
+  api.get(`/patient-care-paths/${id}`);
+
+export const signCarePathOperation = (id, nurseId) =>
+  api.post(`/care-path-operation-executions/${id}/sign`, { nurse_id: nurseId });
+
+export const getCarePathWarnings = (params) =>
+  api.get('/care-path-warnings', { params });
+
+export const handleCarePathWarning = (id, handledBy) =>
+  api.put(`/care-path-warnings/${id}/handle`, { handled_by: handledBy });
+
+export const getCarePathStatistics = (deptId, month) =>
+  api.get('/care-path-statistics/overview', { params: { department_id: deptId, month } });
+
 export default api;

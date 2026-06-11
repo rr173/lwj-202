@@ -402,6 +402,96 @@ db.serialize(() => {
     FOREIGN KEY (supply_id) REFERENCES medical_supplies(id),
     FOREIGN KEY (batch_id) REFERENCES supply_batches(id)
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS care_path_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    department_id INTEGER NOT NULL,
+    applicable_disease TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS care_path_stages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL,
+    stage_order INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    duration_hours REAL NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (template_id) REFERENCES care_path_templates(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS care_path_operations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id INTEGER NOT NULL,
+    operation_order INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    is_critical INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (stage_id) REFERENCES care_path_stages(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS patient_care_paths (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL,
+    department_id INTEGER NOT NULL,
+    patient_bed TEXT NOT NULL,
+    patient_name TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'completed')),
+    current_stage_index INTEGER NOT NULL DEFAULT 0,
+    start_time DATETIME NOT NULL,
+    completed_time DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (template_id) REFERENCES care_path_templates(id),
+    FOREIGN KEY (department_id) REFERENCES departments(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS care_path_stage_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_path_id INTEGER NOT NULL,
+    stage_id INTEGER NOT NULL,
+    stage_index INTEGER NOT NULL,
+    deadline_time DATETIME NOT NULL,
+    actual_start_time DATETIME,
+    actual_end_time DATETIME,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'completed')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (patient_path_id) REFERENCES patient_care_paths(id),
+    FOREIGN KEY (stage_id) REFERENCES care_path_stages(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS care_path_operation_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_execution_id INTEGER NOT NULL,
+    operation_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed')),
+    signed_by INTEGER,
+    signed_by_name TEXT,
+    signed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (stage_execution_id) REFERENCES care_path_stage_executions(id),
+    FOREIGN KEY (operation_id) REFERENCES care_path_operations(id),
+    FOREIGN KEY (signed_by) REFERENCES nurses(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS care_path_warnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_path_id INTEGER NOT NULL,
+    department_id INTEGER NOT NULL,
+    operation_execution_id INTEGER NOT NULL,
+    patient_bed TEXT NOT NULL,
+    operation_name TEXT NOT NULL,
+    overdue_minutes INTEGER NOT NULL DEFAULT 0,
+    is_handled INTEGER NOT NULL DEFAULT 0,
+    handled_by INTEGER,
+    handled_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (patient_path_id) REFERENCES patient_care_paths(id),
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (operation_execution_id) REFERENCES care_path_operation_executions(id),
+    FOREIGN KEY (handled_by) REFERENCES nurses(id)
+  )`);
 });
 
 module.exports = db;
