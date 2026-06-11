@@ -25,7 +25,9 @@ import {
   cancelSecondmentRequest, getSecondmentNurses, getLentOutNurses,
   getScheduleVersions, compareScheduleVersions, rollbackScheduleVersion,
   getNursePreferences, updateNursePreferences,
-  getPreferencesSummary, getPreferenceSatisfaction
+  getPreferencesSummary, getPreferenceSatisfaction,
+  getWorkloadIndex, getDeptWorkloadWarnings, resolveWorkloadWarning,
+  getWorkloadTrend, getWorkloadThreshold, updateWorkloadThreshold
 } from './api';
 
 const { Option } = Select;
@@ -216,6 +218,17 @@ function SchedulePage() {
   const [prefDetailModalVisible, setPrefDetailModalVisible] = useState(false);
   const [prefDetailNurse, setPrefDetailNurse] = useState(null);
 
+  const [workloadIndexData, setWorkloadIndexData] = useState(null);
+  const [workloadWarnings, setWorkloadWarnings] = useState([]);
+  const [workloadTrend, setWorkloadTrend] = useState(null);
+  const [workloadThreshold, setWorkloadThreshold] = useState(8);
+  const [workloadResolveModalVisible, setWorkloadResolveModalVisible] = useState(false);
+  const [resolvingWarning, setResolvingWarning] = useState(null);
+  const [resolveRemark, setResolveRemark] = useState('');
+  const [thresholdModalVisible, setThresholdModalVisible] = useState(false);
+  const [editingThreshold, setEditingThreshold] = useState(8);
+  const [workloadTrendModalVisible, setWorkloadTrendModalVisible] = useState(false);
+
   const fatigueMap = {};
   (fatigueData || []).forEach(f => {
     fatigueMap[f.nurse_id] = f;
@@ -245,6 +258,9 @@ function SchedulePage() {
       loadLentOutNurses();
       loadPreferencesSummary();
       loadPreferenceSatisfaction();
+      loadWorkloadIndex();
+      loadWorkloadWarnings();
+      loadWorkloadThreshold();
     }
   }, [selectedDept, month]);
 
@@ -462,6 +478,97 @@ function SchedulePage() {
       setPreferenceSatisfaction(res.data);
     } catch (err) {
       setPreferenceSatisfaction(null);
+    }
+  };
+
+  const loadWorkloadIndex = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getWorkloadIndex(selectedDept.id);
+      setWorkloadIndexData(res.data);
+    } catch (err) {
+      setWorkloadIndexData(null);
+    }
+  };
+
+  const loadWorkloadWarnings = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getDeptWorkloadWarnings(selectedDept.id, 'pending');
+      setWorkloadWarnings(res.data);
+    } catch (err) {
+      setWorkloadWarnings([]);
+    }
+  };
+
+  const loadWorkloadThreshold = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getWorkloadThreshold(selectedDept.id);
+      setWorkloadThreshold(res.data.threshold);
+      setEditingThreshold(res.data.threshold);
+    } catch (err) {
+      setWorkloadThreshold(8);
+      setEditingThreshold(8);
+    }
+  };
+
+  const handleOpenResolveWarning = (warning) => {
+    setResolvingWarning(warning);
+    setResolveRemark('');
+    setWorkloadResolveModalVisible(true);
+  };
+
+  const handleResolveWarning = async () => {
+    if (!resolvingWarning) return;
+    if (!resolveRemark.trim()) {
+      message.error('请填写处理备注');
+      return;
+    }
+    try {
+      await resolveWorkloadWarning(resolvingWarning.id, {
+        handled_remark: resolveRemark.trim(),
+        handled_by_name: '护士长'
+      });
+      message.success('预警已标记为已处理');
+      setWorkloadResolveModalVisible(false);
+      setResolvingWarning(null);
+      loadWorkloadWarnings();
+      loadWorkloadIndex();
+    } catch (err) {
+      message.error(`处理失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleOpenThresholdModal = () => {
+    setEditingThreshold(workloadThreshold);
+    setThresholdModalVisible(true);
+  };
+
+  const handleSaveThreshold = async () => {
+    if (editingThreshold === undefined || editingThreshold === null || isNaN(editingThreshold) || editingThreshold < 0) {
+      message.error('请输入有效的阈值（大于等于0的数字）');
+      return;
+    }
+    try {
+      await updateWorkloadThreshold(selectedDept.id, editingThreshold);
+      message.success('阈值更新成功');
+      setWorkloadThreshold(editingThreshold);
+      setThresholdModalVisible(false);
+      loadWorkloadIndex();
+    } catch (err) {
+      message.error(`更新失败: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const handleOpenTrendModal = async () => {
+    if (!selectedDept) return;
+    try {
+      const res = await getWorkloadTrend(selectedDept.id, month.format('YYYY-MM'));
+      setWorkloadTrend(res.data);
+      setWorkloadTrendModalVisible(true);
+    } catch (err) {
+      message.error('加载趋势数据失败');
     }
   };
 
@@ -1732,6 +1839,150 @@ function SchedulePage() {
                     </Popconfirm>
                   </div>
                 )}
+              </div>
+            ))
+          )}
+        </div>
+      )
+    },
+    {
+      key: 'workload',
+      label: (
+        <span>
+          负荷监控
+          {workloadWarnings.length > 0 && <Badge count={workloadWarnings.length} style={{ marginLeft: 8 }} />}
+        </span>
+      ),
+      children: (
+        <div style={{ padding: '8px 0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <span style={{ fontSize: '13px', fontWeight: '500' }}>本周护士负荷指数</span>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <Button size="small" onClick={handleOpenThresholdModal}>阈值配置</Button>
+              <Button size="small" onClick={handleOpenTrendModal}>趋势分析</Button>
+            </div>
+          </div>
+
+          {workloadIndexData && workloadIndexData.statistics ? (
+            <>
+              <div style={{ marginBottom: '12px', padding: '8px 12px', borderRadius: '4px', background: workloadIndexData.statistics.is_over_threshold ? '#fff1f0' : '#f6ffed', border: `1px solid ${workloadIndexData.statistics.is_over_threshold ? '#ffa39e' : '#b7eb8f'}` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                  <span>最高: <strong style={{ color: '#cf1322' }}>{workloadIndexData.statistics.max_index}</strong></span>
+                  <span>平均: <strong>{workloadIndexData.statistics.avg_index}</strong></span>
+                  <span>最低: <strong style={{ color: '#389e0d' }}>{workloadIndexData.statistics.min_index}</strong></span>
+                </div>
+                <div style={{ marginTop: '4px', fontSize: '12px', textAlign: 'center' }}>
+                  极差: <strong style={{ color: workloadIndexData.statistics.is_over_threshold ? '#cf1322' : '#52c41a' }}>{workloadIndexData.statistics.index_diff}</strong>
+                  <span style={{ color: '#999', marginLeft: '4px' }}>(阈值 {workloadIndexData.threshold})</span>
+                  {workloadIndexData.statistics.is_over_threshold && <Tag color="red" style={{ marginLeft: '8px' }}>超阈值</Tag>}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '16px', background: '#fff', padding: '8px', borderRadius: '4px' }}>
+                <ReactECharts
+                  option={{
+                    tooltip: {
+                      trigger: 'axis',
+                      axisPointer: { type: 'shadow' },
+                      formatter: (params) => {
+                        const data = workloadIndexData.rankings.find(r => r.nurse_name === params[0].name);
+                        if (!data) return params[0].name;
+                        return `${data.nurse_name}<br/>
+                          夜班×3: ${data.night_count}<br/>
+                          中班×2: ${data.afternoon_count}<br/>
+                          早班×1: ${data.morning_count}<br/>
+                          加班×2: ${data.overtime_count}<br/>
+                          补班×1.5: ${data.substitute_count}<br/>
+                          <strong>综合指数: ${data.load_index}</strong>`;
+                      }
+                    },
+                    grid: { left: '3%', right: '4%', bottom: '3%', top: '5%', containLabel: true },
+                    xAxis: {
+                      type: 'category',
+                      data: workloadIndexData.rankings.map(r => r.nurse_name),
+                      axisLabel: { rotate: 30, interval: 0, fontSize: 11 }
+                    },
+                    yAxis: { type: 'value', name: '指数' },
+                    series: [{
+                      type: 'bar',
+                      data: workloadIndexData.rankings.map((r, idx) => ({
+                        value: r.load_index,
+                        itemStyle: {
+                          color: workloadIndexData.statistics.is_over_threshold && (idx === 0 || idx === workloadIndexData.rankings.length - 1)
+                            ? '#ff4d4f'
+                            : idx === 0
+                            ? '#fa8c16'
+                            : idx === workloadIndexData.rankings.length - 1
+                            ? '#52c41a'
+                            : '#1890ff'
+                        }
+                      })),
+                      barWidth: '50%',
+                      label: {
+                        show: true,
+                        position: 'top',
+                        fontSize: 11,
+                        formatter: '{c}'
+                      }
+                    }]
+                  }}
+                  style={{ height: '220px' }}
+                />
+              </div>
+            </>
+          ) : (
+            <div style={{ textAlign: 'center', color: '#999', padding: '20px 0' }}>暂无负荷数据</div>
+          )}
+
+          <div style={{ marginBottom: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '13px', fontWeight: '500' }}>均衡度预警</span>
+            <span style={{ fontSize: '12px', color: '#999' }}>共 {workloadWarnings.length} 条未处理</span>
+          </div>
+
+          {workloadWarnings.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#999', padding: '40px 0', background: '#fafafa', borderRadius: '4px' }}>
+              暂无未处理的均衡度预警
+            </div>
+          ) : (
+            workloadWarnings.map(warning => (
+              <div
+                key={warning.id}
+                style={{
+                  border: '1px solid #ffccc7',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  marginBottom: '12px',
+                  background: '#fff1f0'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontWeight: '500', color: '#cf1322' }}>
+                    {warning.week_start} ~ {warning.week_end}
+                  </span>
+                  <Tag color="red">指数差 {warning.index_diff}</Tag>
+                </div>
+                <div style={{ fontSize: '13px', color: '#666', marginBottom: '8px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                    <span>高负荷护士:</span>
+                    <span style={{ color: '#cf1322', fontWeight: '500' }}>
+                      {warning.high_load_nurse_name} ({warning.high_load_index})
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+                    <span>低负荷护士:</span>
+                    <span style={{ color: '#389e0d', fontWeight: '500' }}>
+                      {warning.low_load_nurse_name} ({warning.low_load_index})
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                    阈值: {warning.threshold}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <Button size="small" type="primary" onClick={() => handleOpenResolveWarning(warning)}>
+                    标记已处理
+                  </Button>
+                </div>
               </div>
             ))
           )}
@@ -3693,6 +3944,175 @@ function SchedulePage() {
               />
             </div>
           </div>
+        )}
+      </Modal>
+
+      <Modal
+        title="处理均衡度预警"
+        open={workloadResolveModalVisible}
+        onCancel={() => {
+          setWorkloadResolveModalVisible(false);
+          setResolvingWarning(null);
+        }}
+        onOk={handleResolveWarning}
+        okText="确认处理"
+        width={520}
+      >
+        {resolvingWarning && (
+          <div>
+            <Alert
+              type="warning"
+              showIcon
+              message="预警信息"
+              description={
+                <div style={{ fontSize: '13px' }}>
+                  <div>周期: {resolvingWarning.week_start} ~ {resolvingWarning.week_end}</div>
+                  <div>高负荷: <strong style={{ color: '#cf1322' }}>{resolvingWarning.high_load_nurse_name} ({resolvingWarning.high_load_index})</strong></div>
+                  <div>低负荷: <strong style={{ color: '#389e0d' }}>{resolvingWarning.low_load_nurse_name} ({resolvingWarning.low_load_index})</strong></div>
+                  <div>指数差: <strong>{resolvingWarning.index_diff}</strong> (阈值 {resolvingWarning.threshold})</div>
+                </div>
+              }
+              style={{ marginBottom: '16px' }}
+            />
+            <Form layout="vertical">
+              <Form.Item label="处理备注" required>
+                <TextArea
+                  rows={4}
+                  value={resolveRemark}
+                  onChange={(e) => setResolveRemark(e.target.value)}
+                  placeholder="请填写处理措施和备注，例如：已调整下周排班，平衡护士工作负荷..."
+                />
+              </Form.Item>
+            </Form>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        title="负荷均衡度阈值配置"
+        open={thresholdModalVisible}
+        onCancel={() => setThresholdModalVisible(false)}
+        onOk={handleSaveThreshold}
+        okText="保存"
+        width={420}
+      >
+        <div style={{ marginBottom: '12px' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="阈值说明"
+            description="当科室内最高负荷和最低负荷护士的综合指数差超过此阈值时，系统将自动生成均衡度预警。默认值为 8。"
+            style={{ marginBottom: '16px' }}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span style={{ fontSize: '14px', minWidth: '80px' }}>预警阈值:</span>
+            <InputNumber
+              min={0}
+              step={0.5}
+              value={editingThreshold}
+              onChange={(val) => setEditingThreshold(val)}
+              style={{ width: '160px' }}
+            />
+          </div>
+          <div style={{ marginTop: '8px', fontSize: '12px', color: '#999' }}>
+            当前阈值: {workloadThreshold}
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title={`${month.format('YYYY年MM月')} - 负荷趋势分析`}
+        open={workloadTrendModalVisible}
+        onCancel={() => {
+          setWorkloadTrendModalVisible(false);
+          setWorkloadTrend(null);
+        }}
+        footer={[<Button key="ok" type="primary" onClick={() => { setWorkloadTrendModalVisible(false); setWorkloadTrend(null); }}>确定</Button>]}
+        width={780}
+      >
+        {workloadTrend && workloadTrend.weekly_data ? (
+          <div>
+            <Alert
+              type="info"
+              showIcon
+              message="趋势说明"
+              description={`本月阈值: ${workloadTrend.threshold}。标准差越小表示护士间负荷越均衡，平均值和极差的变化可反映整体负荷水平和均衡度改善情况。`}
+              style={{ marginBottom: '16px' }}
+            />
+
+            <div style={{ marginBottom: '16px' }}>
+              <div style={{ fontWeight: '500', marginBottom: '8px', fontSize: '13px' }}>平均指数与标准差趋势</div>
+              <ReactECharts
+                option={{
+                  tooltip: { trigger: 'axis' },
+                  legend: { data: ['平均指数', '标准差'], bottom: 0 },
+                  grid: { left: '3%', right: '4%', bottom: '15%', top: '10%', containLabel: true },
+                  xAxis: {
+                    type: 'category',
+                    data: workloadTrend.weekly_data.map(w => w.label),
+                    axisLabel: { rotate: 20, fontSize: 11 }
+                  },
+                  yAxis: [
+                    { type: 'value', name: '平均指数' },
+                    { type: 'value', name: '标准差' }
+                  ],
+                  series: [
+                    {
+                      name: '平均指数',
+                      type: 'bar',
+                      data: workloadTrend.weekly_data.map(w => w.avg_index),
+                      itemStyle: { color: '#1890ff' },
+                      barWidth: '30%'
+                    },
+                    {
+                      name: '标准差',
+                      type: 'line',
+                      yAxisIndex: 1,
+                      data: workloadTrend.weekly_data.map(w => w.std_dev),
+                      itemStyle: { color: '#fa8c16' },
+                      lineStyle: { width: 2 },
+                      symbol: 'circle',
+                      symbolSize: 8
+                    }
+                  ]
+                }}
+                style={{ height: '260px' }}
+              />
+            </div>
+
+            <div>
+              <div style={{ fontWeight: '500', marginBottom: '8px', fontSize: '13px' }}>每周详细数据</div>
+              <Table
+                size="small"
+                pagination={false}
+                dataSource={workloadTrend.weekly_data}
+                rowKey="week_start"
+                columns={[
+                  { title: '周次', dataIndex: 'label', key: 'label', width: 140 },
+                  { title: '护士数', dataIndex: 'nurse_count', key: 'nurse_count', width: 70, align: 'center' },
+                  { title: '平均指数', dataIndex: 'avg_index', key: 'avg_index', width: 90, align: 'center' },
+                  { title: '标准差', dataIndex: 'std_dev', key: 'std_dev', width: 80, align: 'center' },
+                  { title: '最高', dataIndex: 'max_index', key: 'max_index', width: 70, align: 'center', render: v => <span style={{ color: '#cf1322' }}>{v}</span> },
+                  { title: '最低', dataIndex: 'min_index', key: 'min_index', width: 70, align: 'center', render: v => <span style={{ color: '#389e0d' }}>{v}</span> },
+                  {
+                    title: '极差',
+                    dataIndex: 'index_diff',
+                    key: 'index_diff',
+                    width: 90,
+                    align: 'center',
+                    render: (v) => (
+                      <span style={{ color: v > workloadTrend.threshold ? '#ff4d4f' : '#666', fontWeight: v > workloadTrend.threshold ? '500' : 'normal' }}>
+                        {v}
+                        {v > workloadTrend.threshold && <Tag color="red" style={{ marginLeft: 4, fontSize: '10px', padding: '0 4px', lineHeight: '14px' }}>超阈值</Tag>}
+                      </span>
+                    )
+                  }
+                ]}
+              />
+            </div>
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '40px 0', color: '#999' }}>暂无趋势数据</div>
         )}
       </Modal>
 

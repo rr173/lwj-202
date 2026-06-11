@@ -543,6 +543,44 @@ db.serialize(() => {
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_schedule_preferences_dept_month ON schedule_preferences(department_id, month);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_preference_satisfaction_dept_month ON preference_satisfaction_records(department_id, month);`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS workload_balance_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    threshold REAL NOT NULL DEFAULT 8,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    UNIQUE(department_id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS workload_balance_warnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL,
+    week_start TEXT NOT NULL,
+    week_end TEXT NOT NULL,
+    high_load_nurse_id INTEGER NOT NULL,
+    high_load_nurse_name TEXT NOT NULL,
+    high_load_index REAL NOT NULL,
+    low_load_nurse_id INTEGER NOT NULL,
+    low_load_nurse_name TEXT NOT NULL,
+    low_load_index REAL NOT NULL,
+    index_diff REAL NOT NULL,
+    threshold REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'resolved')),
+    handled_by INTEGER,
+    handled_by_name TEXT,
+    handled_remark TEXT,
+    handled_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (department_id) REFERENCES departments(id),
+    FOREIGN KEY (high_load_nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (low_load_nurse_id) REFERENCES nurses(id),
+    FOREIGN KEY (handled_by) REFERENCES nurses(id)
+  )`);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_workload_warnings_dept_week ON workload_balance_warnings(department_id, week_start);`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_workload_warnings_status ON workload_balance_warnings(status);`);
 });
 
 module.exports = db;

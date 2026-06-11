@@ -10,6 +10,7 @@ const secondmentRouter = require('./secondment');
 const assessmentRouter = require('./assessment');
 const suppliesRouter = require('./supplies');
 const carePathRouter = require('./carePath');
+const workloadBalanceRouter = require('./workloadBalance');
 
 const SHIFT_HOURS = { morning: 8, afternoon: 8, night: 8 };
 const SHIFT_NAMES = {
@@ -656,6 +657,7 @@ app.use('/api', secondmentRouter);
 app.use('/api', assessmentRouter);
 app.use('/api', suppliesRouter);
 app.use('/api', carePathRouter);
+app.use('/api', workloadBalanceRouter);
 
 app.get('/api/departments', (req, res) => {
   db.all('SELECT * FROM departments ORDER BY id', [], (err, rows) => {

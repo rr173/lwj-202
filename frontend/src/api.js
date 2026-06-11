@@ -341,4 +341,25 @@ export const getPreferencesSummary = (deptId, month) =>
 export const getPreferenceSatisfaction = (deptId, month) =>
   api.get(`/departments/${deptId}/preference-satisfaction`, { params: { month } });
 
+export const getWorkloadIndex = (deptId, date) =>
+  api.get(`/departments/${deptId}/workload-index`, { params: date ? { date } : {} });
+
+export const getWorkloadWarnings = (params) =>
+  api.get('/workload-warnings', { params });
+
+export const getDeptWorkloadWarnings = (deptId, status) =>
+  api.get(`/departments/${deptId}/workload-warnings`, { params: status ? { status } : {} });
+
+export const resolveWorkloadWarning = (id, data) =>
+  api.put(`/workload-warnings/${id}/resolve`, data);
+
+export const getWorkloadTrend = (deptId, month) =>
+  api.get(`/departments/${deptId}/workload-trend`, { params: { month } });
+
+export const getWorkloadThreshold = (deptId) =>
+  api.get(`/departments/${deptId}/workload-threshold`);
+
+export const updateWorkloadThreshold = (deptId, threshold) =>
+  api.put(`/departments/${deptId}/workload-threshold`, { threshold });
+
 export default api;
